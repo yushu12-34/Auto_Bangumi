@@ -3,7 +3,14 @@ from fastapi.responses import JSONResponse
 
 from module.downloader import DownloadClient
 from module.manager import SeasonCollector
-from module.models import APIResponse, Bangumi, RSSItem, RSSUpdate, Torrent
+from module.models import (
+    APIResponse,
+    Bangumi,
+    RSSItem,
+    RSSRefreshAllResult,
+    RSSUpdate,
+    Torrent,
+)
 from module.rss import RSSAnalyser, RSSEngine
 from module.security.api import UNAUTHORIZED, get_current_user
 
@@ -54,11 +61,10 @@ async def delete_rss(rss_id: int):
                 status_code=200,
                 content={"msg_en": "Delete RSS successfully.", "msg_zh": "删除 RSS 成功。"},
             )
-        else:
-            return JSONResponse(
-                status_code=406,
-                content={"msg_en": "Delete RSS failed.", "msg_zh": "删除 RSS 失败。"},
-            )
+        return JSONResponse(
+            status_code=406,
+            content={"msg_en": "Delete RSS failed.", "msg_zh": "删除 RSS 失败。"},
+        )
 
 
 @router.post(
@@ -86,11 +92,10 @@ async def disable_rss(rss_id: int):
                 status_code=200,
                 content={"msg_en": "Disable RSS successfully.", "msg_zh": "禁用 RSS 成功。"},
             )
-        else:
-            return JSONResponse(
-                status_code=406,
-                content={"msg_en": "Disable RSS failed.", "msg_zh": "禁用 RSS 失败。"},
-            )
+        return JSONResponse(
+            status_code=406,
+            content={"msg_en": "Disable RSS failed.", "msg_zh": "禁用 RSS 失败。"},
+        )
 
 
 @router.post(
@@ -120,25 +125,28 @@ async def update_rss(
                 status_code=200,
                 content={"msg_en": "Update RSS successfully.", "msg_zh": "更新 RSS 成功。"},
             )
-        else:
-            return JSONResponse(
-                status_code=406,
-                content={"msg_en": "Update RSS failed.", "msg_zh": "更新 RSS 失败。"},
-            )
+        return JSONResponse(
+            status_code=406,
+            content={"msg_en": "Update RSS failed.", "msg_zh": "更新 RSS 失败。"},
+        )
 
 
 @router.get(
     path="/refresh/all",
-    response_model=APIResponse,
+    response_model=RSSRefreshAllResult,
     dependencies=[Depends(get_current_user)],
 )
 async def refresh_all():
     async with DownloadClient() as client:
         with RSSEngine() as engine:
-            await engine.refresh_rss(client)
-    return JSONResponse(
-        status_code=200,
-        content={"msg_en": "Refresh all RSS successfully.", "msg_zh": "刷新 RSS 成功。"},
+            items = await engine.refresh_rss(client)
+    success_count = sum(1 for item in items if item.success)
+    total = len(items)
+    return RSSRefreshAllResult(
+        total=total,
+        success_count=success_count,
+        failed_count=total - success_count,
+        items=items,
     )
 
 
@@ -169,7 +177,6 @@ async def get_torrent(
         return engine.get_rss_torrents(rss_id)
 
 
-# Old API
 analyser = RSSAnalyser()
 
 
@@ -180,8 +187,7 @@ async def analysis(rss: RSSItem):
     data = await analyser.link_to_data(rss)
     if isinstance(data, Bangumi):
         return data
-    else:
-        return u_response(data)
+    return u_response(data)
 
 
 @router.post(

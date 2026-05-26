@@ -6,10 +6,30 @@ from typing import Optional
 
 from module.database import Database, engine
 from module.downloader import DownloadClient
-from module.models import Bangumi, ResponseModel, RSSItem, Torrent
+from module.models import (
+    Bangumi,
+    RSSItem,
+    RSSRefreshItemResult,
+    ResponseModel,
+    Torrent,
+)
 from module.network import RequestContent
 
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_ERROR_PATTERNS = [
+    (
+        re.compile(
+            r"(?i)(password|passwd|pwd|token|api[_-]?key|secret|cookie|authorization)(\s*[:=]\s*)([^,;\s]+)"
+        ),
+        r"\1\2********",
+    ),
+    (re.compile(r"(?i)(bearer\s+)([^\s,;]+)"), r"\1********"),
+    (
+        re.compile(r"(?i)(https?://[^\s:@/]+:)([^@\s/]+)(@)"),
+        r"\1********\3",
+    ),
+]
 
 
 class RSSEngine(Database):
@@ -22,17 +42,50 @@ class RSSEngine(Database):
     async def _get_torrents(rss: RSSItem) -> list[Torrent]:
         async with RequestContent() as req:
             torrents = await req.get_torrents(rss.url)
-            # Add RSS ID
             for torrent in torrents:
                 torrent.rss_id = rss.id
         return torrents
+
+    @staticmethod
+    def _sanitize_error_message(error: Exception | str | None) -> str:
+        message = str(error).strip() if error is not None else ""
+        if not message:
+            return "Unknown error"
+        for pattern, replacement in _SENSITIVE_ERROR_PATTERNS:
+            message = pattern.sub(replacement, message)
+        return message
+
+    @classmethod
+    def _build_download_error_message(cls, torrent: Torrent, error: str) -> str:
+        return f"{torrent.name}: {cls._sanitize_error_message(error)}"
+
+    @staticmethod
+    def _build_success_message(
+        new_torrent_count: int, matched_count: int, downloaded_count: int
+    ) -> str:
+        if new_torrent_count == 0:
+            return "Refresh succeeded. No new torrents found."
+        if matched_count == 0:
+            return f"Refresh succeeded. Found {new_torrent_count} new torrents."
+        return (
+            "Refresh succeeded. "
+            f"Found {new_torrent_count} new torrents and added {downloaded_count} matched torrents to downloader."
+        )
+
+    @staticmethod
+    def _collapse_messages(messages: list[str]) -> str:
+        if not messages:
+            return "Unknown error"
+        if len(messages) <= 3:
+            return "; ".join(messages)
+        shown = "; ".join(messages[:3])
+        return f"{shown}; and {len(messages) - 3} more errors"
 
     def get_rss_torrents(self, rss_id: int) -> list[Torrent]:
         rss = self.rss.search_id(rss_id)
         if rss:
             return self.torrent.search_rss(rss_id)
-        else:
-            return []
+        return []
 
     async def add_rss(
         self,
@@ -59,13 +112,12 @@ class RSSEngine(Database):
                 msg_en="RSS added successfully.",
                 msg_zh="RSS 添加成功。",
             )
-        else:
-            return ResponseModel(
-                status=False,
-                status_code=406,
-                msg_en="RSS added failed.",
-                msg_zh="RSS 添加失败。",
-            )
+        return ResponseModel(
+            status=False,
+            status_code=406,
+            msg_en="RSS added failed.",
+            msg_zh="RSS 添加失败。",
+        )
 
     def disable_list(self, rss_id_list: list[int]):
         self.rss.disable_batch(rss_id_list)
@@ -97,8 +149,7 @@ class RSSEngine(Database):
 
     async def pull_rss(self, rss_item: RSSItem) -> list[Torrent]:
         torrents = await self._get_torrents(rss_item)
-        new_torrents = self.torrent.check_new(torrents)
-        return new_torrents
+        return self.torrent.check_new(torrents)
 
     async def _pull_rss_with_status(
         self, rss_item: RSSItem
@@ -107,29 +158,102 @@ class RSSEngine(Database):
             torrents = await self.pull_rss(rss_item)
             return torrents, None
         except Exception as e:
-            logger.warning(f"[Engine] Failed to fetch RSS {rss_item.name}: {e}")
-            return [], str(e)
+            logger.warning("[Engine] Failed to fetch RSS %s: %s", rss_item.name, e)
+            return [], self._sanitize_error_message(e)
 
-    def _get_filter_pattern(self, filter_str: str) -> re.Pattern:
-        if filter_str not in self._filter_cache:
-            raw_pattern = filter_str.replace(",", "|")
-            try:
-                self._filter_cache[filter_str] = re.compile(
-                    raw_pattern, re.IGNORECASE
+    async def _refresh_single_rss(
+        self,
+        client: DownloadClient,
+        rss_item: RSSItem,
+        new_torrents: list[Torrent],
+        error: Optional[str],
+        now: str,
+    ) -> RSSRefreshItemResult:
+        download_errors: list[str] = []
+        matched_count = 0
+        downloaded_count = 0
+
+        if error:
+            message = self._sanitize_error_message(error)
+            success = False
+        else:
+            for torrent in new_torrents:
+                matched_data = self.match_torrent(torrent)
+                if not matched_data:
+                    continue
+                matched_count += 1
+                try:
+                    added = await client.add_torrent(torrent, matched_data)
+                except Exception as exc:
+                    logger.warning(
+                        "[Engine] Failed to add torrent %s from RSS %s: %s",
+                        torrent.name,
+                        rss_item.name,
+                        exc,
+                    )
+                    download_errors.append(
+                        self._build_download_error_message(torrent, str(exc))
+                    )
+                    continue
+                if added:
+                    logger.debug("[Engine] Add torrent %s to client", torrent.name)
+                    torrent.downloaded = True
+                    downloaded_count += 1
+                else:
+                    download_errors.append(
+                        self._build_download_error_message(
+                            torrent, "Downloader rejected the torrent"
+                        )
+                    )
+            self.torrent.add_all(new_torrents)
+            success = len(download_errors) == 0
+            if success:
+                message = self._build_success_message(
+                    len(new_torrents), matched_count, downloaded_count
                 )
-            except re.error:
-                # Filter contains invalid regex chars (e.g. unmatched '[')
-                # Fall back to escaping each term for literal matching
-                terms = filter_str.split(",")
-                escaped = "|".join(re.escape(t) for t in terms)
-                self._filter_cache[filter_str] = re.compile(
-                    escaped, re.IGNORECASE
+            else:
+                message = self._collapse_messages(download_errors)
+
+        rss_item.connection_status = "healthy" if success else "error"
+        rss_item.last_checked_at = now
+        rss_item.last_error = None if success else message
+        self.add(rss_item)
+
+        return RSSRefreshItemResult(
+            rss_id=rss_item.id,
+            rss_name=rss_item.name or rss_item.url,
+            success=success,
+            message=message,
+        )
+
+    def _get_refresh_items(self, rss_id: Optional[int] = None) -> list[RSSItem]:
+        if rss_id is None:
+            return self.rss.search_active()
+        rss_item = self.rss.search_id(rss_id)
+        return [rss_item] if rss_item else []
+
+    async def refresh_rss(
+        self, client: DownloadClient, rss_id: Optional[int] = None
+    ) -> list[RSSRefreshItemResult]:
+        rss_items = self._get_refresh_items(rss_id)
+        logger.debug("[Engine] Get %s RSS items", len(rss_items))
+        results = await asyncio.gather(
+            *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        refresh_results: list[RSSRefreshItemResult] = []
+        for rss_item, (new_torrents, error) in zip(rss_items, results):
+            refresh_results.append(
+                await self._refresh_single_rss(
+                    client=client,
+                    rss_item=rss_item,
+                    new_torrents=new_torrents,
+                    error=error,
+                    now=now,
                 )
-                logger.warning(
-                    f"[Engine] Filter '{filter_str}' contains invalid regex, "
-                    f"using literal matching"
-                )
-        return self._filter_cache[filter_str]
+            )
+        self.commit()
+        return refresh_results
 
     def match_torrent(self, torrent: Torrent) -> Optional[Bangumi]:
         matched: Bangumi = self.bangumi.match_torrent(torrent.name)
@@ -142,35 +266,24 @@ class RSSEngine(Database):
                 return matched
         return None
 
-    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
-        # Get All RSS Items
-        if not rss_id:
-            rss_items: list[RSSItem] = self.rss.search_active()
-        else:
-            rss_item = self.rss.search_id(rss_id)
-            rss_items = [rss_item] if rss_item else []
-        # From RSS Items, fetch all torrents concurrently
-        logger.debug("[Engine] Get %s RSS items", len(rss_items))
-        results = await asyncio.gather(
-            *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
-        )
-        now = datetime.now(timezone.utc).isoformat()
-        # Process results sequentially (DB operations)
-        for rss_item, (new_torrents, error) in zip(rss_items, results):
-            # Update connection status
-            rss_item.connection_status = "error" if error else "healthy"
-            rss_item.last_checked_at = now
-            rss_item.last_error = error
-            self.add(rss_item)
-            for torrent in new_torrents:
-                matched_data = self.match_torrent(torrent)
-                if matched_data:
-                    if await client.add_torrent(torrent, matched_data):
-                        logger.debug("[Engine] Add torrent %s to client", torrent.name)
-                    torrent.downloaded = True
-            # Add all torrents to database
-            self.torrent.add_all(new_torrents)
-        self.commit()
+    def _get_filter_pattern(self, filter_str: str) -> re.Pattern:
+        if filter_str not in self._filter_cache:
+            raw_pattern = filter_str.replace(",", "|")
+            try:
+                self._filter_cache[filter_str] = re.compile(
+                    raw_pattern, re.IGNORECASE
+                )
+            except re.error:
+                terms = filter_str.split(",")
+                escaped = "|".join(re.escape(t) for t in terms)
+                self._filter_cache[filter_str] = re.compile(
+                    escaped, re.IGNORECASE
+                )
+                logger.warning(
+                    "[Engine] Filter '%s' contains invalid regex, using literal matching",
+                    filter_str,
+                )
+        return self._filter_cache[filter_str]
 
     async def download_bangumi(self, bangumi: Bangumi):
         async with RequestContent() as req:
@@ -187,10 +300,9 @@ class RSSEngine(Database):
                         msg_en=f"[Engine] Download {bangumi.official_title} successfully.",
                         msg_zh=f"下载 {bangumi.official_title} 成功。",
                     )
-            else:
-                return ResponseModel(
-                    status=False,
-                    status_code=406,
-                    msg_en=f"[Engine] Download {bangumi.official_title} failed.",
-                    msg_zh=f"[Engine] 下载 {bangumi.official_title} 失败。",
-                )
+            return ResponseModel(
+                status=False,
+                status_code=406,
+                msg_en=f"[Engine] Download {bangumi.official_title} failed.",
+                msg_zh=f"[Engine] 下载 {bangumi.official_title} 失败。",
+            )

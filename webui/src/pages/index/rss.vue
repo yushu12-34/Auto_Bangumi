@@ -1,20 +1,65 @@
 <script lang="tsx" setup>
-import { type DataTableColumns, NDataTable, NTooltip } from 'naive-ui';
+import { NAlert, type DataTableColumns, NDataTable, NTooltip } from 'naive-ui';
+import type { RSSRefreshAllResult } from '#/api';
 import type { RSS } from '#/rss';
+import { buildRefreshAllFeedback } from '@/store/rss';
 
 definePage({
   name: 'RSS',
 });
 
+const message = useMessage();
 const { t } = useMyI18n();
 const { isMobile } = useBreakpointQuery();
 const { rss, selectedRSS } = storeToRefs(useRSSStore());
-const { getAll, deleteSelected, disableSelected, enableSelected } =
+const { getAll, refreshAll, deleteSelected, disableSelected, enableSelected } =
   useRSSStore();
+
+const isRefreshingAll = ref(false);
+const refreshSummary = ref<RSSRefreshAllResult | null>(null);
 
 onActivated(() => {
   getAll();
 });
+
+const refreshFeedback = computed(() => {
+  if (!refreshSummary.value) return null;
+  return buildRefreshAllFeedback(refreshSummary.value, t);
+});
+
+const failedRefreshItems = computed(
+  () => refreshFeedback.value?.failedItems ?? []
+);
+
+function handleMobileSelect(keys: number[]) {
+  selectedRSS.value = keys;
+}
+
+function handleCheckedRowKeys(keys: number[]) {
+  selectedRSS.value = keys;
+}
+
+async function handleRefreshAll() {
+  isRefreshingAll.value = true;
+  try {
+    const result = await refreshAll();
+    refreshSummary.value = result;
+    const feedback = buildRefreshAllFeedback(result, t);
+    const content = `${feedback.title} ${feedback.message}`;
+
+    if (feedback.type === 'success') {
+      message.success(content);
+    } else if (feedback.type === 'warning') {
+      message.warning(content);
+    } else if (feedback.type === 'error') {
+      message.error(content);
+    } else {
+      message.info(content);
+    }
+  } finally {
+    isRefreshingAll.value = false;
+  }
+}
 
 const rssColumns = computed<DataTableColumns<RSS>>(() => [
   {
@@ -56,7 +101,7 @@ const rssColumns = computed<DataTableColumns<RSS>>(() => [
             <NTooltip>
               {{
                 trigger: () => <ab-tag type="warn" title={t('rss.error')} />,
-                default: () => rss.last_error || 'Unknown error',
+                default: () => rss.last_error || t('rss.refresh_unknown_error'),
               }}
             </NTooltip>
           )}
@@ -77,7 +122,36 @@ const rssRowKey = (row: RSS) => row.id;
 <template>
   <div class="page-rss">
     <ab-container :title="$t('rss.title')">
-      <!-- Mobile: Card-based list -->
+      <template #title-right>
+        <ab-button size="small" :loading="isRefreshingAll" @click="handleRefreshAll">
+          {{ $t('rss.refresh_all') }}
+        </ab-button>
+      </template>
+
+      <NAlert
+        v-if="refreshFeedback"
+        :type="refreshFeedback.type"
+        :title="refreshFeedback.title"
+        class="rss-refresh-summary"
+      >
+        <div>{{ refreshFeedback.message }}</div>
+        <div v-if="failedRefreshItems.length > 0" class="rss-refresh-failure-block">
+          <div class="rss-refresh-failure-title">
+            {{ $t('rss.refresh_failed_items_title') }}
+          </div>
+          <ul class="rss-refresh-failure-list">
+            <li
+              v-for="item in failedRefreshItems"
+              :key="item.rss_id"
+              class="rss-refresh-failure-item"
+            >
+              <span class="rss-refresh-failure-name">{{ item.rss_name }}</span>
+              <span>{{ item.message }}</span>
+            </li>
+          </ul>
+        </div>
+      </NAlert>
+
       <ab-data-list
         v-if="isMobile"
         :items="rss || []"
@@ -87,7 +161,7 @@ const rssRowKey = (row: RSS) => row.id;
         ]"
         :selectable="true"
         key-field="id"
-        @select="(keys) => (selectedRSS = keys as number[])"
+        @select="handleMobileSelect"
       >
         <template #item="{ item }">
           <div class="rss-card-content">
@@ -105,7 +179,7 @@ const rssRowKey = (row: RSS) => row.id;
                 <template #trigger>
                   <ab-tag type="warn" :title="$t('rss.error')" />
                 </template>
-                {{ item.last_error || 'Unknown error' }}
+                {{ item.last_error || $t('rss.refresh_unknown_error') }}
               </NTooltip>
               <ab-tag
                 :type="item.enabled ? 'active' : 'inactive'"
@@ -116,7 +190,6 @@ const rssRowKey = (row: RSS) => row.id;
         </template>
       </ab-data-list>
 
-      <!-- Desktop: Data table -->
       <NDataTable
         v-else
         :columns="rssColumns"
@@ -125,7 +198,7 @@ const rssRowKey = (row: RSS) => row.id;
         :pagination="false"
         :bordered="false"
         :max-height="500"
-        @update:checked-row-keys="(e) => (selectedRSS = (e as number[]))"
+        @update:checked-row-keys="handleCheckedRowKeys"
       ></NDataTable>
 
       <div v-if="selectedRSS.length > 0">
@@ -168,7 +241,33 @@ const rssRowKey = (row: RSS) => row.id;
   }
 }
 
-// Mobile RSS card styles
+.rss-refresh-summary {
+  margin-bottom: 12px;
+}
+
+.rss-refresh-failure-block {
+  margin-top: 12px;
+}
+
+.rss-refresh-failure-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.rss-refresh-failure-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.rss-refresh-failure-item {
+  margin-bottom: 4px;
+}
+
+.rss-refresh-failure-name {
+  font-weight: 600;
+  margin-right: 6px;
+}
+
 .rss-card-content {
   display: flex;
   flex-direction: column;
