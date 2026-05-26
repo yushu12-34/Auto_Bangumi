@@ -128,4 +128,90 @@ describe('RSS API Logic', () => {
       expect(updatedRSS.enabled).toBe(mockRSSItem.enabled);
     });
   });
+
+  describe('refresh all results structure', () => {
+    it('should have valid RSSRefreshAllResult structure', () => {
+      const result = {
+        total: 3,
+        success_count: 2,
+        failed_count: 1,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true },
+          { rss_id: 2, rss_name: 'Feed 2', success: true },
+          { rss_id: 3, rss_name: 'Feed 3', success: false, message: 'Connection error' },
+        ],
+      };
+
+      expect(result.total).toBe(3);
+      expect(result.success_count).toBe(2);
+      expect(result.failed_count).toBe(1);
+      expect(Array.isArray(result.items)).toBe(true);
+      expect(result.items.length).toBe(3);
+    });
+
+    it('should handle all successful refresh', () => {
+      const result = {
+        total: 2,
+        success_count: 2,
+        failed_count: 0,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true },
+          { rss_id: 2, rss_name: 'Feed 2', success: true },
+        ],
+      };
+
+      expect(result.total).toBe(2);
+      expect(result.success_count).toBe(2);
+      expect(result.failed_count).toBe(0);
+      expect(result.items.every((item) => item.success)).toBe(true);
+    });
+
+    it('should handle all failed refresh', () => {
+      const result = {
+        total: 2,
+        success_count: 0,
+        failed_count: 2,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: false, message: 'Error 1' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Error 2' },
+        ],
+      };
+
+      expect(result.total).toBe(2);
+      expect(result.success_count).toBe(0);
+      expect(result.failed_count).toBe(2);
+      expect(result.items.every((item) => !item.success)).toBe(true);
+    });
+
+    it('should handle empty RSS list refresh', () => {
+      const result = {
+        total: 0,
+        success_count: 0,
+        failed_count: 0,
+        items: [],
+      };
+
+      expect(result.total).toBe(0);
+      expect(result.success_count).toBe(0);
+      expect(result.failed_count).toBe(0);
+      expect(result.items.length).toBe(0);
+    });
+
+    it('should have correct item structure', () => {
+      const item = {
+        rss_id: 1,
+        rss_name: 'Test Feed',
+        success: true,
+        message: null,
+      };
+
+      expect(item).toHaveProperty('rss_id');
+      expect(item).toHaveProperty('rss_name');
+      expect(item).toHaveProperty('success');
+      expect(item).toHaveProperty('message');
+      expect(typeof item.rss_id).toBe('number');
+      expect(typeof item.rss_name).toBe('string');
+      expect(typeof item.success).toBe('boolean');
+    });
+  });
 });

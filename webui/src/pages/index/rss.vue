@@ -1,6 +1,7 @@
 <script lang="tsx" setup>
 import { type DataTableColumns, NDataTable, NTooltip } from 'naive-ui';
 import type { RSS } from '#/rss';
+import type { RSSRefreshAllResult, RSSRefreshResultItem } from '#/api';
 
 definePage({
   name: 'RSS',
@@ -12,9 +13,48 @@ const { rss, selectedRSS } = storeToRefs(useRSSStore());
 const { getAll, deleteSelected, disableSelected, enableSelected } =
   useRSSStore();
 
+const message = useMessage();
+const isRefreshing = ref(false);
+const refreshResult = ref<RSSRefreshAllResult | null>(null);
+
 onActivated(() => {
   getAll();
 });
+
+async function handleRefreshAll() {
+  if (isRefreshing.value) return;
+  isRefreshing.value = true;
+  try {
+    const result = await apiRSS.refreshAll();
+    refreshResult.value = result;
+    
+    // Refresh the RSS list to show updated status
+    await getAll();
+    
+    // Show result message
+    if (result.failed_count === 0) {
+      message.success(t('rss.refresh_all_success', { total: result.total }));
+    } else if (result.success_count === 0) {
+      message.error(t('rss.refresh_all_failed', { total: result.total }));
+    } else {
+      message.warning(
+        t('rss.refresh_partial_failed', {
+          success: result.success_count,
+          failed: result.failed_count,
+        })
+      );
+    }
+  } catch (error) {
+    console.error('Refresh all failed:', error);
+    message.error(t('rss.refresh_failed'));
+  } finally {
+    isRefreshing.value = false;
+  }
+}
+
+function clearRefreshResult() {
+  refreshResult.value = null;
+}
 
 const rssColumns = computed<DataTableColumns<RSS>>(() => [
   {
@@ -77,6 +117,40 @@ const rssRowKey = (row: RSS) => row.id;
 <template>
   <div class="page-rss">
     <ab-container :title="$t('rss.title')">
+      <!-- Refresh button -->
+      <div class="rss-toolbar">
+        <ab-button @click="handleRefreshAll" :loading="isRefreshing">
+          {{ $t('rss.refresh_all') }}
+        </ab-button>
+      </div>
+
+      <!-- Refresh result summary -->
+      <div v-if="refreshResult" class="refresh-result">
+        <div class="refresh-summary">
+          <ab-tag type="primary">
+            {{ t('rss.refresh_total', { count: refreshResult.total }) }}
+          </ab-tag>
+          <ab-tag type="success">
+            {{ t('rss.refresh_success', { count: refreshResult.success_count }) }}
+          </ab-tag>
+          <ab-tag v-if="refreshResult.failed_count > 0" type="warn">
+            {{ t('rss.refresh_failed', { count: refreshResult.failed_count }) }}
+          </ab-tag>
+          <ab-button size="small" type="text" @click="clearRefreshResult">
+            {{ t('common.close') }}
+          </ab-button>
+        </div>
+        
+        <!-- Failed items details -->
+        <div v-if="refreshResult.failed_count > 0" class="failed-items">
+          <div class="failed-title">{{ t('rss.failed_details') }}</div>
+          <div v-for="item in refreshResult.items.filter(i => !i.success)" :key="item.rss_id" class="failed-item">
+            <span class="failed-name">{{ item.rss_name }}</span>
+            <span class="failed-message">{{ item.message }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Mobile: Card-based list -->
       <ab-data-list
         v-if="isMobile"
@@ -148,6 +222,67 @@ const rssRowKey = (row: RSS) => row.id;
 .page-rss {
   overflow: auto;
   flex-grow: 1;
+}
+
+.rss-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.refresh-result {
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border);
+}
+
+.refresh-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.failed-items {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.failed-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  margin-bottom: 8px;
+}
+
+.failed-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 8px 12px;
+  background: var(--color-danger-light);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  gap: 12px;
+}
+
+.failed-name {
+  font-weight: 500;
+  color: var(--color-danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.failed-message {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  word-break: break-all;
 }
 
 .divider {

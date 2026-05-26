@@ -6,7 +6,14 @@ from typing import Optional
 
 from module.database import Database, engine
 from module.downloader import DownloadClient
-from module.models import Bangumi, ResponseModel, RSSItem, Torrent
+from module.models import (
+    Bangumi,
+    ResponseModel,
+    RSSItem,
+    Torrent,
+    RSSRefreshResultItem,
+    RSSRefreshAllResult,
+)
 from module.network import RequestContent
 
 logger = logging.getLogger(__name__)
@@ -142,7 +149,9 @@ class RSSEngine(Database):
                 return matched
         return None
 
-    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
+    async def refresh_rss(
+        self, client: DownloadClient, rss_id: Optional[int] = None
+    ) -> RSSRefreshAllResult:
         # Get All RSS Items
         if not rss_id:
             rss_items: list[RSSItem] = self.rss.search_active()
@@ -155,6 +164,8 @@ class RSSEngine(Database):
             *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
         )
         now = datetime.now(timezone.utc).isoformat()
+        # Prepare result items
+        result_items: list[RSSRefreshResultItem] = []
         # Process results sequentially (DB operations)
         for rss_item, (new_torrents, error) in zip(rss_items, results):
             # Update connection status
@@ -162,15 +173,40 @@ class RSSEngine(Database):
             rss_item.last_checked_at = now
             rss_item.last_error = error
             self.add(rss_item)
+            
+            # Record result
+            result_item = RSSRefreshResultItem(
+                rss_id=rss_item.id,
+                rss_name=rss_item.name,
+                success=error is None,
+                message=error,
+            )
+            result_items.append(result_item)
+            
             for torrent in new_torrents:
                 matched_data = self.match_torrent(torrent)
                 if matched_data:
-                    if await client.add_torrent(torrent, matched_data):
-                        logger.debug("[Engine] Add torrent %s to client", torrent.name)
+                    try:
+                        if await client.add_torrent(torrent, matched_data):
+                            logger.debug("[Engine] Add torrent %s to client", torrent.name)
+                    except Exception as e:
+                        # If adding to downloader fails, still mark RSS as successful (we fetched the RSS)
+                        logger.warning(f"[Engine] Failed to add torrent {torrent.name} to client: {e}")
                     torrent.downloaded = True
             # Add all torrents to database
             self.torrent.add_all(new_torrents)
         self.commit()
+        
+        # Calculate summary
+        success_count = sum(1 for item in result_items if item.success)
+        failed_count = len(result_items) - success_count
+        
+        return RSSRefreshAllResult(
+            total=len(result_items),
+            success_count=success_count,
+            failed_count=failed_count,
+            items=result_items,
+        )
 
     async def download_bangumi(self, bangumi: Bangumi):
         async with RequestContent() as req:

@@ -257,7 +257,15 @@
     "selectbox": "Select",
     "status": "Status",
     "title": "RSS Item",
-    "url": "Url"
+    "url": "Url",
+    "refresh_all": "Refresh All",
+    "refresh_total": "Total: {count}",
+    "refresh_success": "Success: {count}",
+    "refresh_failed": "Failed: {count}",
+    "failed_details": "Failed Details",
+    "refresh_all_success": "All {total} RSS feeds refreshed successfully",
+    "refresh_all_failed": "All {total} RSS feeds failed to refresh",
+    "refresh_partial_failed": "{success} succeeded, {failed} failed to refresh"
   },
   "calendar": {
     "title": "Schedule",
@@ -378,7 +386,8 @@
     "confirm": "Confirm",
     "select": "Select",
     "selectAll": "Select All",
-    "items": "items"
+    "items": "items",
+    "close": "Close"
   },
   "theme": {
     "light": "Light",

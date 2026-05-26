@@ -257,7 +257,15 @@
     "selectbox": "选择",
     "status": "状态",
     "title": "RSS 条目",
-    "url": "链接"
+    "url": "链接",
+    "refresh_all": "刷新全部",
+    "refresh_total": "总计: {count}",
+    "refresh_success": "成功: {count}",
+    "refresh_failed": "失败: {count}",
+    "failed_details": "失败详情",
+    "refresh_all_success": "全部 {total} 个 RSS 源刷新成功",
+    "refresh_all_failed": "全部 {total} 个 RSS 源刷新失败",
+    "refresh_partial_failed": "{success} 个成功，{failed} 个失败"
   },
   "calendar": {
     "title": "放送表",
@@ -378,7 +386,8 @@
     "confirm": "确认",
     "select": "选择",
     "selectAll": "全选",
-    "items": "项"
+    "items": "项",
+    "close": "关闭"
   },
   "theme": {
     "light": "浅色",
