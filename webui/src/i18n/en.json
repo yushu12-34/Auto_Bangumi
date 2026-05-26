@@ -257,7 +257,11 @@
     "selectbox": "Select",
     "status": "Status",
     "title": "RSS Item",
-    "url": "Url"
+    "url": "Url",
+    "refresh_all": "Refresh All",
+    "refresh_success": "All RSS feeds refreshed successfully.",
+    "refresh_failed": "All RSS feeds failed to refresh.",
+    "refresh_partial": "Some RSS feeds failed to refresh. Please check the status column."
   },
   "calendar": {
     "title": "Schedule",

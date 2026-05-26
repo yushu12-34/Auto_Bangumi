@@ -142,7 +142,7 @@ class RSSEngine(Database):
                 return matched
         return None
 
-    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
+    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None) -> RSSRefreshResult:
         # Get All RSS Items
         if not rss_id:
             rss_items: list[RSSItem] = self.rss.search_active()
@@ -155,6 +155,11 @@ class RSSEngine(Database):
             *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
         )
         now = datetime.now(timezone.utc).isoformat()
+        
+        refresh_items = []
+        success_count = 0
+        failed_count = 0
+
         # Process results sequentially (DB operations)
         for rss_item, (new_torrents, error) in zip(rss_items, results):
             # Update connection status
@@ -162,6 +167,20 @@ class RSSEngine(Database):
             rss_item.last_checked_at = now
             rss_item.last_error = error
             self.add(rss_item)
+            
+            refresh_items.append(
+                RSSRefreshItem(
+                    rss_id=rss_item.id,
+                    rss_name=rss_item.name,
+                    success=not error,
+                    message=error,
+                )
+            )
+            if error:
+                failed_count += 1
+            else:
+                success_count += 1
+
             for torrent in new_torrents:
                 matched_data = self.match_torrent(torrent)
                 if matched_data:
@@ -171,6 +190,13 @@ class RSSEngine(Database):
             # Add all torrents to database
             self.torrent.add_all(new_torrents)
         self.commit()
+
+        return RSSRefreshResult(
+            total=len(rss_items),
+            success_count=success_count,
+            failed_count=failed_count,
+            items=refresh_items,
+        )
 
     async def download_bangumi(self, bangumi: Bangumi):
         async with RequestContent() as req:

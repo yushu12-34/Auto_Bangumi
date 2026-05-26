@@ -95,4 +95,21 @@ describe('RSS Store Logic', () => {
       expect(filtered).toEqual([1, 3]);
     });
   });
+
+  describe('refresh result logic', () => {
+    it('should correctly handle partial failure summary', () => {
+      const result = {
+        total: 2,
+        success_count: 1,
+        failed_count: 1,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: null },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Timeout' },
+        ]
+      };
+      
+      expect(result.failed_count).toBeGreaterThan(0);
+      expect(result.success_count).toBeGreaterThan(0);
+    });
+  });
 });

@@ -1,0 +1,357 @@
+diff --git a/backend/src/module/api/rss.py b/backend/src/module/api/rss.py
+index f00411a..75bcbb1 100644
+--- a/backend/src/module/api/rss.py
++++ b/backend/src/module/api/rss.py
+@@ -129,17 +129,14 @@ async def update_rss(
+ 
+ @router.get(
+     path="/refresh/all",
+-    response_model=APIResponse,
++    response_model=RSSRefreshResult,
+     dependencies=[Depends(get_current_user)],
+ )
+ async def refresh_all():
+     async with DownloadClient() as client:
+         with RSSEngine() as engine:
+-            await engine.refresh_rss(client)
+-    return JSONResponse(
+-        status_code=200,
+-        content={"msg_en": "Refresh all RSS successfully.", "msg_zh": "刷新 RSS 成功。"},
+-    )
++            result = await engine.refresh_rss(client)
++    return result
+ 
+ 
+ @router.get(
+diff --git a/backend/src/module/models/rss.py b/backend/src/module/models/rss.py
+index 8ea51ae..f550ff0 100644
+--- a/backend/src/module/models/rss.py
++++ b/backend/src/module/models/rss.py
+@@ -21,3 +21,18 @@ class RSSUpdate(SQLModel):
+     aggregate: Optional[bool] = Field(True, alias="aggregate")
+     parser: Optional[str] = Field("mikan", alias="parser")
+     enabled: Optional[bool] = Field(True, alias="enabled")
++
++
++class RSSRefreshItem(SQLModel):
++    rss_id: int
++    rss_name: str
++    success: bool
++    message: Optional[str] = None
++
++
++class RSSRefreshResult(SQLModel):
++    total: int
++    success_count: int
++    failed_count: int
++    items: list[RSSRefreshItem]
++
+diff --git a/backend/src/module/rss/engine.py b/backend/src/module/rss/engine.py
+index a9dc9da..c2dbccf 100644
+--- a/backend/src/module/rss/engine.py
++++ b/backend/src/module/rss/engine.py
+@@ -142,7 +142,7 @@ class RSSEngine(Database):
+                 return matched
+         return None
+ 
+-    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
++    async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None) -> RSSRefreshResult:
+         # Get All RSS Items
+         if not rss_id:
+             rss_items: list[RSSItem] = self.rss.search_active()
+@@ -155,6 +155,11 @@ class RSSEngine(Database):
+             *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
+         )
+         now = datetime.now(timezone.utc).isoformat()
++        
++        refresh_items = []
++        success_count = 0
++        failed_count = 0
++
+         # Process results sequentially (DB operations)
+         for rss_item, (new_torrents, error) in zip(rss_items, results):
+             # Update connection status
+@@ -162,6 +167,20 @@ class RSSEngine(Database):
+             rss_item.last_checked_at = now
+             rss_item.last_error = error
+             self.add(rss_item)
++            
++            refresh_items.append(
++                RSSRefreshItem(
++                    rss_id=rss_item.id,
++                    rss_name=rss_item.name,
++                    success=not error,
++                    message=error,
++                )
++            )
++            if error:
++                failed_count += 1
++            else:
++                success_count += 1
++
+             for torrent in new_torrents:
+                 matched_data = self.match_torrent(torrent)
+                 if matched_data:
+@@ -172,6 +191,13 @@ class RSSEngine(Database):
+             self.torrent.add_all(new_torrents)
+         self.commit()
+ 
++        return RSSRefreshResult(
++            total=len(rss_items),
++            success_count=success_count,
++            failed_count=failed_count,
++            items=refresh_items,
++        )
++
+     async def download_bangumi(self, bangumi: Bangumi):
+         async with RequestContent() as req:
+             torrents = await req.get_torrents(
+diff --git a/backend/src/test/test_api_rss.py b/backend/src/test/test_api_rss.py
+index c5e1527..681aa70 100644
+--- a/backend/src/test/test_api_rss.py
++++ b/backend/src/test/test_api_rss.py
+@@ -267,13 +267,16 @@ class TestRefreshRss:
+             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+             with patch("module.api.rss.RSSEngine") as MockEngine:
+                 mock_eng = MagicMock()
+-                mock_eng.refresh_rss = AsyncMock()
++                mock_eng.refresh_rss = AsyncMock(return_value={"total": 1, "success_count": 1, "failed_count": 0, "items": [{"rss_id": 1, "rss_name": "Feed", "success": True, "message": None}]})
+                 MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                 MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+ 
+                 response = authed_client.get("/api/v1/rss/refresh/all")
+ 
+         assert response.status_code == 200
++        data = response.json()
++        assert data["total"] == 1
++        assert data["success_count"] == 1
+ 
+     def test_refresh_single(self, authed_client):
+         """GET /rss/refresh/{id} refreshes specific feed."""
+diff --git a/backend/src/test/test_rss_engine_new.py b/backend/src/test/test_rss_engine_new.py
+index 1a925d3..2859cba 100644
+--- a/backend/src/test/test_rss_engine_new.py
++++ b/backend/src/test/test_rss_engine_new.py
+@@ -247,10 +247,49 @@ class TestRefreshRss:
+         with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+             mock_get.return_value = []
+             client = AsyncMock()
+-            await rss_engine.refresh_rss(client, rss_id=2)
++            result = await rss_engine.refresh_rss(client, rss_id=2)
+ 
+         # Only called once (for rss_id=2)
+         mock_get.assert_called_once()
++        
++        # Verify result
++        assert result.total == 1
++        assert result.success_count == 1
++        assert len(result.items) == 1
++        assert result.items[0].rss_id == 2
++
++    async def test_refresh_partial_failure(self, rss_engine):
++        """refresh_rss does not block next RSS if one fails."""
++        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss")
++        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss")
++        rss_engine.rss.add(rss1)
++        rss_engine.rss.add(rss2)
++
++        # Mock _pull_rss_with_status to fail for rss1 and succeed for rss2
++        async def mock_pull(rss_item):
++            if rss_item.id == 1:
++                return [], "Connection Error"
++            return [Torrent(name="test", url="test")], None
++
++        with patch.object(RSSEngine, "_pull_rss_with_status", side_effect=mock_pull):
++            client = AsyncMock()
++            result = await rss_engine.refresh_rss(client)
++
++        assert result.total == 2
++        assert result.success_count == 1
++        assert result.failed_count == 1
++        assert result.items[0].success is False
++        assert result.items[0].message == "Connection Error"
++        assert result.items[1].success is True
++
++    async def test_refresh_empty_rss(self, rss_engine):
++        """refresh_rss with empty list returns valid empty result."""
++        client = AsyncMock()
++        result = await rss_engine.refresh_rss(client)
++        assert result.total == 0
++        assert result.success_count == 0
++        assert result.failed_count == 0
++        assert len(result.items) == 0
+ 
+     async def test_refresh_nonexistent_rss_id(self, rss_engine):
+         """refresh_rss with non-existent rss_id does nothing."""
+diff --git a/webui/src/api/rss.ts b/webui/src/api/rss.ts
+index 9cd5d92..e256e97 100644
+--- a/webui/src/api/rss.ts
++++ b/webui/src/api/rss.ts
+@@ -1,4 +1,4 @@
+-import type { RSS } from '#/rss';
++import type { RSS, RSSRefreshResult } from '#/rss';
+ import type { Torrent } from '#/torrent';
+ import type { ApiSuccess } from '#/api';
+ 
+@@ -60,7 +60,7 @@ export const apiRSS = {
+   },
+ 
+   async refreshAll() {
+-    const { data } = await axios.get<ApiSuccess>('api/v1/rss/refresh/all');
++    const { data } = await axios.get<RSSRefreshResult>('api/v1/rss/refresh/all');
+     return data!;
+   },
+ 
+diff --git a/webui/src/i18n/en.json b/webui/src/i18n/en.json
+index dbaa4ef..935c6e5 100644
+--- a/webui/src/i18n/en.json
++++ b/webui/src/i18n/en.json
+@@ -257,7 +257,11 @@
+     "selectbox": "Select",
+     "status": "Status",
+     "title": "RSS Item",
+-    "url": "Url"
++    "url": "Url",
++    "refresh_all": "Refresh All",
++    "refresh_success": "All RSS feeds refreshed successfully.",
++    "refresh_failed": "All RSS feeds failed to refresh.",
++    "refresh_partial": "Some RSS feeds failed to refresh. Please check the status column."
+   },
+   "calendar": {
+     "title": "Schedule",
+diff --git a/webui/src/i18n/zh-CN.json b/webui/src/i18n/zh-CN.json
+index 5081dc1..22c3477 100644
+--- a/webui/src/i18n/zh-CN.json
++++ b/webui/src/i18n/zh-CN.json
+@@ -257,7 +257,11 @@
+     "selectbox": "选择",
+     "status": "状态",
+     "title": "RSS 条目",
+-    "url": "链接"
++    "url": "链接",
++    "refresh_all": "刷新全部",
++    "refresh_success": "全部 RSS 刷新成功。",
++    "refresh_failed": "全部 RSS 刷新失败。",
++    "refresh_partial": "部分 RSS 刷新失败，请查看状态列了解详情。"
+   },
+   "calendar": {
+     "title": "放送表",
+diff --git a/webui/src/pages/index/rss.vue b/webui/src/pages/index/rss.vue
+index 6355bab..add8e38 100644
+--- a/webui/src/pages/index/rss.vue
++++ b/webui/src/pages/index/rss.vue
+@@ -9,9 +9,30 @@ definePage({
+ const { t } = useMyI18n();
+ const { isMobile } = useBreakpointQuery();
+ const { rss, selectedRSS } = storeToRefs(useRSSStore());
+-const { getAll, deleteSelected, disableSelected, enableSelected } =
++const { getAll, deleteSelected, disableSelected, enableSelected, refreshAll } =
+   useRSSStore();
+ 
++const message = useMessage();
++const loadingRefresh = ref(false);
++
++const handleRefreshAll = async () => {
++  loadingRefresh.value = true;
++  try {
++    const res = await refreshAll();
++    if (res.failed_count === 0) {
++      message.success(t('rss.refresh_success'));
++    } else if (res.success_count === 0) {
++      message.error(t('rss.refresh_failed'));
++    } else {
++      message.warning(t('rss.refresh_partial'));
++    }
++  } catch (error) {
++    // Error is handled by axios interceptor
++  } finally {
++    loadingRefresh.value = false;
++  }
++};
++
+ onActivated(() => {
+   getAll();
+ });
+diff --git a/webui/src/store/__tests__/rss.test.ts b/webui/src/store/__tests__/rss.test.ts
+index 12810b4..0e21be2 100644
+--- a/webui/src/store/__tests__/rss.test.ts
++++ b/webui/src/store/__tests__/rss.test.ts
+@@ -95,4 +95,21 @@ describe('RSS Store Logic', () => {
+       expect(filtered).toEqual([1, 3]);
+     });
+   });
++
++  describe('refresh result logic', () => {
++    it('should correctly handle partial failure summary', () => {
++      const result = {
++        total: 2,
++        success_count: 1,
++        failed_count: 1,
++        items: [
++          { rss_id: 1, rss_name: 'Feed 1', success: true, message: null },
++          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Timeout' },
++        ]
++      };
++      
++      expect(result.failed_count).toBeGreaterThan(0);
++      expect(result.success_count).toBeGreaterThan(0);
++    });
++  });
+ });
+diff --git a/webui/src/store/rss.ts b/webui/src/store/rss.ts
+index 8c645d3..2e848da 100644
+--- a/webui/src/store/rss.ts
++++ b/webui/src/store/rss.ts
+@@ -11,8 +11,8 @@ export const useRSSStore = defineStore('rss', () => {
+       return arr.sort((a, b) => b.id - a.id);
+     }
+ 
+-    const enabled = sort(res.filter((e) => e.enabled));
+-    const disabled = sort(res.filter((e) => !e.enabled));
++    const enabled = sort(res.filter((e: RSS) => e.enabled));
++    const disabled = sort(res.filter((e: RSS) => !e.enabled));
+ 
+     rss.value = [...enabled, ...disabled];
+   }
+@@ -34,6 +34,12 @@ export const useRSSStore = defineStore('rss', () => {
+   const deleteSelected = () => deleteRSS(selectedRSS.value);
+   const enableSelected = () => enableRSS(selectedRSS.value);
+ 
++  const refreshAll = async () => {
++    const res = await apiRSS.refreshAll();
++    getAll();
++    return res;
++  };
++
+   return {
+     rss,
+     selectedRSS,
+@@ -46,5 +52,6 @@ export const useRSSStore = defineStore('rss', () => {
+     disableSelected,
+     deleteSelected,
+     enableSelected,
++    refreshAll,
+   };
+ });
+diff --git a/webui/types/rss.ts b/webui/types/rss.ts
+index 41f104c..f561bda 100644
+--- a/webui/types/rss.ts
++++ b/webui/types/rss.ts
+@@ -21,3 +21,17 @@ export const rssTemplate: RSS = {
+   last_checked_at: null,
+   last_error: null,
+ };
++
++export interface RSSRefreshItem {
++  rss_id: number;
++  rss_name: string;
++  success: boolean;
++  message: string | null;
++}
++
++export interface RSSRefreshResult {
++  total: number;
++  success_count: number;
++  failed_count: number;
++  items: RSSRefreshItem[];
++}

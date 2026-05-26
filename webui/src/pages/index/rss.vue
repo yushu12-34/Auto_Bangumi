@@ -9,8 +9,29 @@ definePage({
 const { t } = useMyI18n();
 const { isMobile } = useBreakpointQuery();
 const { rss, selectedRSS } = storeToRefs(useRSSStore());
-const { getAll, deleteSelected, disableSelected, enableSelected } =
+const { getAll, deleteSelected, disableSelected, enableSelected, refreshAll } =
   useRSSStore();
+
+const message = useMessage();
+const loadingRefresh = ref(false);
+
+const handleRefreshAll = async () => {
+  loadingRefresh.value = true;
+  try {
+    const res = await refreshAll();
+    if (res.failed_count === 0) {
+      message.success(t('rss.refresh_success'));
+    } else if (res.success_count === 0) {
+      message.error(t('rss.refresh_failed'));
+    } else {
+      message.warning(t('rss.refresh_partial'));
+    }
+  } catch (error) {
+    // Error is handled by axios interceptor
+  } finally {
+    loadingRefresh.value = false;
+  }
+};
 
 onActivated(() => {
   getAll();

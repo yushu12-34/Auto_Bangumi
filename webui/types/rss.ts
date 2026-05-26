@@ -21,3 +21,17 @@ export const rssTemplate: RSS = {
   last_checked_at: null,
   last_error: null,
 };
+
+export interface RSSRefreshItem {
+  rss_id: number;
+  rss_name: string;
+  success: boolean;
+  message: string | null;
+}
+
+export interface RSSRefreshResult {
+  total: number;
+  success_count: number;
+  failed_count: number;
+  items: RSSRefreshItem[];
+}

@@ -11,8 +11,8 @@ export const useRSSStore = defineStore('rss', () => {
       return arr.sort((a, b) => b.id - a.id);
     }
 
-    const enabled = sort(res.filter((e) => e.enabled));
-    const disabled = sort(res.filter((e) => !e.enabled));
+    const enabled = sort(res.filter((e: RSS) => e.enabled));
+    const disabled = sort(res.filter((e: RSS) => !e.enabled));
 
     rss.value = [...enabled, ...disabled];
   }
@@ -34,6 +34,12 @@ export const useRSSStore = defineStore('rss', () => {
   const deleteSelected = () => deleteRSS(selectedRSS.value);
   const enableSelected = () => enableRSS(selectedRSS.value);
 
+  const refreshAll = async () => {
+    const res = await apiRSS.refreshAll();
+    getAll();
+    return res;
+  };
+
   return {
     rss,
     selectedRSS,
@@ -46,5 +52,6 @@ export const useRSSStore = defineStore('rss', () => {
     disableSelected,
     deleteSelected,
     enableSelected,
+    refreshAll,
   };
 });

@@ -21,3 +21,18 @@ class RSSUpdate(SQLModel):
     aggregate: Optional[bool] = Field(True, alias="aggregate")
     parser: Optional[str] = Field("mikan", alias="parser")
     enabled: Optional[bool] = Field(True, alias="enabled")
+
+
+class RSSRefreshItem(SQLModel):
+    rss_id: int
+    rss_name: str
+    success: bool
+    message: Optional[str] = None
+
+
+class RSSRefreshResult(SQLModel):
+    total: int
+    success_count: int
+    failed_count: int
+    items: list[RSSRefreshItem]
+

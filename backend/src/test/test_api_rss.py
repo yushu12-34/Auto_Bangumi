@@ -267,13 +267,16 @@ class TestRefreshRss:
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("module.api.rss.RSSEngine") as MockEngine:
                 mock_eng = MagicMock()
-                mock_eng.refresh_rss = AsyncMock()
+                mock_eng.refresh_rss = AsyncMock(return_value={"total": 1, "success_count": 1, "failed_count": 0, "items": [{"rss_id": 1, "rss_name": "Feed", "success": True, "message": None}]})
                 MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
                 MockEngine.return_value.__exit__ = MagicMock(return_value=False)
 
                 response = authed_client.get("/api/v1/rss/refresh/all")
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["success_count"] == 1
 
     def test_refresh_single(self, authed_client):
         """GET /rss/refresh/{id} refreshes specific feed."""

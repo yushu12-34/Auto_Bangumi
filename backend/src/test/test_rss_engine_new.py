@@ -247,10 +247,49 @@ class TestRefreshRss:
         with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = []
             client = AsyncMock()
-            await rss_engine.refresh_rss(client, rss_id=2)
+            result = await rss_engine.refresh_rss(client, rss_id=2)
 
         # Only called once (for rss_id=2)
         mock_get.assert_called_once()
+        
+        # Verify result
+        assert result.total == 1
+        assert result.success_count == 1
+        assert len(result.items) == 1
+        assert result.items[0].rss_id == 2
+
+    async def test_refresh_partial_failure(self, rss_engine):
+        """refresh_rss does not block next RSS if one fails."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss")
+        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss")
+        rss_engine.rss.add(rss1)
+        rss_engine.rss.add(rss2)
+
+        # Mock _pull_rss_with_status to fail for rss1 and succeed for rss2
+        async def mock_pull(rss_item):
+            if rss_item.id == 1:
+                return [], "Connection Error"
+            return [Torrent(name="test", url="test")], None
+
+        with patch.object(RSSEngine, "_pull_rss_with_status", side_effect=mock_pull):
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss(client)
+
+        assert result.total == 2
+        assert result.success_count == 1
+        assert result.failed_count == 1
+        assert result.items[0].success is False
+        assert result.items[0].message == "Connection Error"
+        assert result.items[1].success is True
+
+    async def test_refresh_empty_rss(self, rss_engine):
+        """refresh_rss with empty list returns valid empty result."""
+        client = AsyncMock()
+        result = await rss_engine.refresh_rss(client)
+        assert result.total == 0
+        assert result.success_count == 0
+        assert result.failed_count == 0
+        assert len(result.items) == 0
 
     async def test_refresh_nonexistent_rss_id(self, rss_engine):
         """refresh_rss with non-existent rss_id does nothing."""
