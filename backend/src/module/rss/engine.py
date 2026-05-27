@@ -6,10 +6,27 @@ from typing import Optional
 
 from module.database import Database, engine
 from module.downloader import DownloadClient
-from module.models import Bangumi, ResponseModel, RSSItem, Torrent
+from module.models import Bangumi, RefreshAllResult, RefreshResultItem, ResponseModel, RSSItem, Torrent
 from module.network import RequestContent
 
 logger = logging.getLogger(__name__)
+
+# Patterns that may appear in error messages and should be redacted
+_SENSITIVE_PATTERNS = [
+    re.compile(r"(token=)[^&\s]+", re.IGNORECASE),
+    re.compile(r"(password=)[^&\s]+", re.IGNORECASE),
+    re.compile(r"(passwd=)[^&\s]+", re.IGNORECASE),
+    re.compile(r"(secret=)[^&\s]+", re.IGNORECASE),
+    re.compile(r"(api[_-]?key=)[^&\s]+", re.IGNORECASE),
+    re.compile(r"(cookie[:\s]*=)\S+", re.IGNORECASE),
+]
+
+
+def _sanitize_error(msg: str) -> str:
+    """Remove sensitive information from error messages."""
+    for pattern in _SENSITIVE_PATTERNS:
+        msg = pattern.sub(r"\1***", msg)
+    return msg
 
 
 class RSSEngine(Database):
@@ -143,6 +160,12 @@ class RSSEngine(Database):
         return None
 
     async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
+        result = await self.refresh_rss_with_result(client, rss_id)
+        return result
+
+    async def refresh_rss_with_result(
+        self, client: DownloadClient, rss_id: Optional[int] = None
+    ) -> RefreshAllResult:
         # Get All RSS Items
         if not rss_id:
             rss_items: list[RSSItem] = self.rss.search_active()
@@ -155,6 +178,7 @@ class RSSEngine(Database):
             *[self._pull_rss_with_status(rss_item) for rss_item in rss_items]
         )
         now = datetime.now(timezone.utc).isoformat()
+        refresh_items: list[RefreshResultItem] = []
         # Process results sequentially (DB operations)
         for rss_item, (new_torrents, error) in zip(rss_items, results):
             # Update connection status
@@ -170,7 +194,23 @@ class RSSEngine(Database):
                     torrent.downloaded = True
             # Add all torrents to database
             self.torrent.add_all(new_torrents)
+            # Build per-item result
+            refresh_items.append(
+                RefreshResultItem(
+                    rss_id=rss_item.id,
+                    rss_name=rss_item.name or "",
+                    success=error is None,
+                    message=_sanitize_error(error) if error else "OK",
+                )
+            )
         self.commit()
+        success_count = sum(1 for item in refresh_items if item.success)
+        return RefreshAllResult(
+            total=len(refresh_items),
+            success_count=success_count,
+            failed_count=len(refresh_items) - success_count,
+            items=refresh_items,
+        )
 
     async def download_bangumi(self, bangumi: Bangumi):
         async with RequestContent() as req:

@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { mockRSSList } from '@/test/mocks/api';
+import type { RefreshAllResult } from '#/api';
 
 describe('RSS Store Logic', () => {
   describe('sort and filter functions', () => {
@@ -93,6 +94,91 @@ describe('RSS Store Logic', () => {
       const filtered = selectedRSS.filter((id) => id !== 2);
 
       expect(filtered).toEqual([1, 3]);
+    });
+  });
+
+  describe('refreshAll result handling logic', () => {
+    it('should identify all-success result', () => {
+      const result: RefreshAllResult = {
+        total: 3,
+        success_count: 3,
+        failed_count: 0,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: true, message: 'OK' },
+          { rss_id: 3, rss_name: 'Feed 3', success: true, message: 'OK' },
+        ],
+      };
+
+      expect(result.failed_count === 0).toBe(true);
+      expect(result.success_count === result.total).toBe(true);
+    });
+
+    it('should identify partial failure result', () => {
+      const result: RefreshAllResult = {
+        total: 3,
+        success_count: 1,
+        failed_count: 2,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Connection refused' },
+          { rss_id: 3, rss_name: 'Feed 3', success: false, message: 'Parse error' },
+        ],
+      };
+
+      expect(result.failed_count > 0).toBe(true);
+      expect(result.success_count > 0).toBe(true);
+
+      const failedItems = result.items.filter((item) => !item.success);
+      expect(failedItems).toHaveLength(2);
+      expect(failedItems[0].rss_name).toBe('Feed 2');
+      expect(failedItems[1].rss_name).toBe('Feed 3');
+    });
+
+    it('should identify all-failure result', () => {
+      const result: RefreshAllResult = {
+        total: 2,
+        success_count: 0,
+        failed_count: 2,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: false, message: 'Network error' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Timeout' },
+        ],
+      };
+
+      expect(result.success_count === 0).toBe(true);
+      expect(result.failed_count === result.total).toBe(true);
+    });
+
+    it('should handle empty result', () => {
+      const result: RefreshAllResult = {
+        total: 0,
+        success_count: 0,
+        failed_count: 0,
+        items: [],
+      };
+
+      expect(result.total === 0).toBe(true);
+      expect(result.items).toHaveLength(0);
+    });
+
+    it('should extract failed items for display', () => {
+      const result: RefreshAllResult = {
+        total: 4,
+        success_count: 2,
+        failed_count: 2,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Connection refused' },
+          { rss_id: 3, rss_name: 'Feed 3', success: true, message: 'OK' },
+          { rss_id: 4, rss_name: 'Feed 4', success: false, message: 'Timeout' },
+        ],
+      };
+
+      const failedItems = result.items.filter((item) => !item.success);
+      expect(failedItems).toHaveLength(2);
+      expect(failedItems.map((i) => i.rss_name)).toEqual(['Feed 2', 'Feed 4']);
+      expect(failedItems.map((i) => i.message)).toEqual(['Connection refused', 'Timeout']);
     });
   });
 });

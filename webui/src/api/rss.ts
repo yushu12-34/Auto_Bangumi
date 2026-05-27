@@ -1,6 +1,6 @@
 import type { RSS } from '#/rss';
 import type { Torrent } from '#/torrent';
-import type { ApiSuccess } from '#/api';
+import type { ApiSuccess, RefreshAllResult } from '#/api';
 
 export const apiRSS = {
   async get() {
@@ -60,7 +60,7 @@ export const apiRSS = {
   },
 
   async refreshAll() {
-    const { data } = await axios.get<ApiSuccess>('api/v1/rss/refresh/all');
+    const { data } = await axios.get<RefreshAllResult>('api/v1/rss/refresh/all');
     return data!;
   },
 

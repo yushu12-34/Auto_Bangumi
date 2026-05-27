@@ -8,6 +8,7 @@ import {
   mockRSSItem,
   mockRSSList,
 } from '@/test/mocks/api';
+import type { RefreshAllResult, RefreshResultItem } from '#/api';
 
 describe('RSS API Logic', () => {
   describe('RSS data structure', () => {
@@ -126,6 +127,74 @@ describe('RSS API Logic', () => {
       expect(updatedRSS.name).toBe('Updated Feed');
       expect(updatedRSS.url).toBe(mockRSSItem.url);
       expect(updatedRSS.enabled).toBe(mockRSSItem.enabled);
+    });
+  });
+
+  describe('RefreshAllResult data structure', () => {
+    it('should have required RefreshAllResult fields', () => {
+      const result: RefreshAllResult = {
+        total: 2,
+        success_count: 1,
+        failed_count: 1,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Error' },
+        ],
+      };
+
+      expect(result).toHaveProperty('total');
+      expect(result).toHaveProperty('success_count');
+      expect(result).toHaveProperty('failed_count');
+      expect(result).toHaveProperty('items');
+    });
+
+    it('should have correct field types for RefreshAllResult', () => {
+      const result: RefreshAllResult = {
+        total: 2,
+        success_count: 1,
+        failed_count: 1,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Error' },
+        ],
+      };
+
+      expect(typeof result.total).toBe('number');
+      expect(typeof result.success_count).toBe('number');
+      expect(typeof result.failed_count).toBe('number');
+      expect(Array.isArray(result.items)).toBe(true);
+    });
+
+    it('should have required RefreshResultItem fields', () => {
+      const item: RefreshResultItem = {
+        rss_id: 1,
+        rss_name: 'Feed 1',
+        success: true,
+        message: 'OK',
+      };
+
+      expect(item).toHaveProperty('rss_id');
+      expect(item).toHaveProperty('rss_name');
+      expect(item).toHaveProperty('success');
+      expect(item).toHaveProperty('message');
+    });
+
+    it('should maintain total = success_count + failed_count invariant', () => {
+      const result: RefreshAllResult = {
+        total: 5,
+        success_count: 3,
+        failed_count: 2,
+        items: [
+          { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+          { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Error' },
+          { rss_id: 3, rss_name: 'Feed 3', success: true, message: 'OK' },
+          { rss_id: 4, rss_name: 'Feed 4', success: false, message: 'Error' },
+          { rss_id: 5, rss_name: 'Feed 5', success: true, message: 'OK' },
+        ],
+      };
+
+      expect(result.success_count + result.failed_count).toBe(result.total);
+      expect(result.items.length).toBe(result.total);
     });
   });
 });

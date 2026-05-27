@@ -262,6 +262,127 @@ class TestRefreshRss:
 
 
 # ---------------------------------------------------------------------------
+# refresh_rss_with_result
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshRssWithResult:
+    async def test_all_success(self, rss_engine):
+        """refresh_rss_with_result returns all-success result."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss", enabled=True)
+        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss", enabled=True)
+        rss_engine.rss.add(rss1)
+        rss_engine.rss.add(rss2)
+
+        with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = []
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss_with_result(client)
+
+        assert result.total == 2
+        assert result.success_count == 2
+        assert result.failed_count == 0
+        assert all(item.success for item in result.items)
+
+    async def test_partial_failure(self, rss_engine):
+        """refresh_rss_with_result returns partial failure when some feeds fail."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss", enabled=True)
+        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss", enabled=True)
+        rss_engine.rss.add(rss1)
+        rss_engine.rss.add(rss2)
+
+        async def _mock_get_torrents(rss_item):
+            if rss_item.name == "Feed 2":
+                raise ConnectionError("Connection refused")
+            return []
+
+        with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = _mock_get_torrents
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss_with_result(client)
+
+        assert result.total == 2
+        assert result.success_count == 1
+        assert result.failed_count == 1
+        assert result.items[0].success is True
+        assert result.items[1].success is False
+        assert "Connection refused" in result.items[1].message
+
+    async def test_all_failure(self, rss_engine):
+        """refresh_rss_with_result returns all failure when all feeds fail."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss", enabled=True)
+        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss", enabled=True)
+        rss_engine.rss.add(rss1)
+        rss_engine.rss.add(rss2)
+
+        with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = ConnectionError("Network unreachable")
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss_with_result(client)
+
+        assert result.total == 2
+        assert result.success_count == 0
+        assert result.failed_count == 2
+        assert all(not item.success for item in result.items)
+
+    async def test_empty_rss_list(self, rss_engine):
+        """refresh_rss_with_result returns empty result when no RSS items."""
+        client = AsyncMock()
+        result = await rss_engine.refresh_rss_with_result(client)
+
+        assert result.total == 0
+        assert result.success_count == 0
+        assert result.failed_count == 0
+        assert result.items == []
+
+    async def test_failure_does_not_block_subsequent(self, rss_engine):
+        """One RSS failure does not prevent subsequent RSS from refreshing."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss", enabled=True)
+        rss2 = make_rss_item(name="Feed 2", url="https://feed2.com/rss", enabled=True)
+        rss3 = make_rss_item(name="Feed 3", url="https://feed3.com/rss", enabled=True)
+        rss_engine.rss.add(rss1)
+        rss_engine.rss.add(rss2)
+        rss_engine.rss.add(rss3)
+
+        call_count = 0
+
+        async def _mock_get_torrents(rss_item):
+            nonlocal call_count
+            call_count += 1
+            if rss_item.name == "Feed 2":
+                raise ConnectionError("Connection refused")
+            return []
+
+        with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = _mock_get_torrents
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss_with_result(client)
+
+        assert call_count == 3
+        assert result.total == 3
+        assert result.success_count == 2
+        assert result.failed_count == 1
+        assert result.items[0].success is True
+        assert result.items[1].success is False
+        assert result.items[2].success is True
+
+    async def test_sensitive_info_sanitized(self, rss_engine):
+        """Error messages with sensitive info are sanitized."""
+        rss1 = make_rss_item(name="Feed 1", url="https://feed1.com/rss?token=secret123", enabled=True)
+        rss_engine.rss.add(rss1)
+
+        with patch.object(RSSEngine, "_get_torrents", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = Exception("Auth failed for token=secret123&password=mypass")
+            client = AsyncMock()
+            result = await rss_engine.refresh_rss_with_result(client)
+
+        assert result.items[0].success is False
+        assert "secret123" not in result.items[0].message
+        assert "mypass" not in result.items[0].message
+        assert "***" in result.items[0].message
+
+
+# ---------------------------------------------------------------------------
 # add_rss
 # ---------------------------------------------------------------------------
 

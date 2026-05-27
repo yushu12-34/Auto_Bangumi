@@ -22,3 +22,17 @@ export interface ApiSuccess {
   msg_en: string;
   msg_zh: string;
 }
+
+export interface RefreshResultItem {
+  rss_id: number;
+  rss_name: string;
+  success: boolean;
+  message: string;
+}
+
+export interface RefreshAllResult {
+  total: number;
+  success_count: number;
+  failed_count: number;
+  items: RefreshResultItem[];
+}

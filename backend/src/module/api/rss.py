@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from module.downloader import DownloadClient
 from module.manager import SeasonCollector
-from module.models import APIResponse, Bangumi, RSSItem, RSSUpdate, Torrent
+from module.models import APIResponse, Bangumi, RefreshAllResult, RSSItem, RSSUpdate, Torrent
 from module.rss import RSSAnalyser, RSSEngine
 from module.security.api import UNAUTHORIZED, get_current_user
 
@@ -129,17 +129,14 @@ async def update_rss(
 
 @router.get(
     path="/refresh/all",
-    response_model=APIResponse,
+    response_model=RefreshAllResult,
     dependencies=[Depends(get_current_user)],
 )
 async def refresh_all():
     async with DownloadClient() as client:
         with RSSEngine() as engine:
-            await engine.refresh_rss(client)
-    return JSONResponse(
-        status_code=200,
-        content={"msg_en": "Refresh all RSS successfully.", "msg_zh": "刷新 RSS 成功。"},
-    )
+            result = await engine.refresh_rss_with_result(client)
+    return result
 
 
 @router.get(

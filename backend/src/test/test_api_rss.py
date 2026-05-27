@@ -260,20 +260,97 @@ class TestUpdateRss:
 
 class TestRefreshRss:
     def test_refresh_all(self, authed_client):
-        """GET /rss/refresh/all triggers engine.refresh_rss."""
+        """GET /rss/refresh/all triggers engine.refresh_rss_with_result and returns structured result."""
+        from module.models import RefreshAllResult, RefreshResultItem
+
+        mock_result = RefreshAllResult(
+            total=2,
+            success_count=2,
+            failed_count=0,
+            items=[
+                RefreshResultItem(rss_id=1, rss_name="Feed 1", success=True, message="OK"),
+                RefreshResultItem(rss_id=2, rss_name="Feed 2", success=True, message="OK"),
+            ],
+        )
         with patch("module.api.rss.DownloadClient") as MockClient:
             mock_client = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("module.api.rss.RSSEngine") as MockEngine:
                 mock_eng = MagicMock()
-                mock_eng.refresh_rss = AsyncMock()
+                mock_eng.refresh_rss_with_result = AsyncMock(return_value=mock_result)
                 MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
                 MockEngine.return_value.__exit__ = MagicMock(return_value=False)
 
                 response = authed_client.get("/api/v1/rss/refresh/all")
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["success_count"] == 2
+        assert data["failed_count"] == 0
+        assert len(data["items"]) == 2
+
+    def test_refresh_all_partial_failure(self, authed_client):
+        """GET /rss/refresh/all returns partial failure result."""
+        from module.models import RefreshAllResult, RefreshResultItem
+
+        mock_result = RefreshAllResult(
+            total=3,
+            success_count=1,
+            failed_count=2,
+            items=[
+                RefreshResultItem(rss_id=1, rss_name="Feed 1", success=True, message="OK"),
+                RefreshResultItem(rss_id=2, rss_name="Feed 2", success=False, message="Connection refused"),
+                RefreshResultItem(rss_id=3, rss_name="Feed 3", success=False, message="Parse error"),
+            ],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_with_result = AsyncMock(return_value=mock_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["success_count"] == 1
+        assert data["failed_count"] == 2
+        assert data["items"][1]["success"] is False
+        assert data["items"][1]["message"] == "Connection refused"
+
+    def test_refresh_all_empty(self, authed_client):
+        """GET /rss/refresh/all with no RSS items returns empty result."""
+        from module.models import RefreshAllResult, RefreshResultItem
+
+        mock_result = RefreshAllResult(
+            total=0,
+            success_count=0,
+            failed_count=0,
+            items=[],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_with_result = AsyncMock(return_value=mock_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 0
+        assert data["items"] == []
 
     def test_refresh_single(self, authed_client):
         """GET /rss/refresh/{id} refreshes specific feed."""

@@ -17,6 +17,34 @@ export const useRSSStore = defineStore('rss', () => {
     rss.value = [...enabled, ...disabled];
   }
 
+  const message = useMessage();
+  const { t } = useMyI18n();
+
+  async function refreshAll() {
+    try {
+      const result = await apiRSS.refreshAll();
+      getAll();
+
+      if (result.total === 0) {
+        message.info(t('rss.refresh_no_feeds'));
+      } else if (result.failed_count === 0) {
+        message.success(t('rss.refresh_all_success'));
+      } else if (result.success_count === 0) {
+        message.error(t('rss.refresh_all_failed'));
+      } else {
+        message.warning(
+          t('rss.refresh_partial', {
+            success: result.success_count,
+            failed: result.failed_count,
+          })
+        );
+      }
+      return result;
+    } catch {
+      message.error(t('rss.refresh_all_failed'));
+    }
+  }
+
   const opts = {
     showMessage: true,
     onSuccess() {
@@ -39,6 +67,7 @@ export const useRSSStore = defineStore('rss', () => {
     selectedRSS,
 
     getAll,
+    refreshAll,
     updateRSS,
     disableRSS,
     deleteRSS,

@@ -1,6 +1,7 @@
 <script lang="tsx" setup>
 import { type DataTableColumns, NDataTable, NTooltip } from 'naive-ui';
 import type { RSS } from '#/rss';
+import type { RefreshAllResult } from '#/api';
 
 definePage({
   name: 'RSS',
@@ -9,11 +10,29 @@ definePage({
 const { t } = useMyI18n();
 const { isMobile } = useBreakpointQuery();
 const { rss, selectedRSS } = storeToRefs(useRSSStore());
-const { getAll, deleteSelected, disableSelected, enableSelected } =
+const { getAll, deleteSelected, disableSelected, enableSelected, refreshAll } =
   useRSSStore();
+
+const isRefreshing = ref(false);
+const refreshResult = ref<RefreshAllResult | null>(null);
 
 onActivated(() => {
   getAll();
+});
+
+async function handleRefreshAll() {
+  isRefreshing.value = true;
+  refreshResult.value = null;
+  const result = await refreshAll();
+  if (result && result.failed_count > 0) {
+    refreshResult.value = result;
+  }
+  isRefreshing.value = false;
+}
+
+const failedItems = computed(() => {
+  if (!refreshResult.value) return [];
+  return refreshResult.value.items.filter((item) => !item.success);
 });
 
 const rssColumns = computed<DataTableColumns<RSS>>(() => [
@@ -77,6 +96,26 @@ const rssRowKey = (row: RSS) => row.id;
 <template>
   <div class="page-rss">
     <ab-container :title="$t('rss.title')">
+      <!-- Refresh All button -->
+      <template #title-right>
+        <ab-button :loading="isRefreshing" @click="handleRefreshAll">
+          {{ $t('rss.refresh_all') }}
+        </ab-button>
+      </template>
+
+      <!-- Failed items summary -->
+      <div v-if="failedItems.length > 0" class="refresh-summary">
+        <div class="refresh-summary-title">{{ $t('rss.refresh_failed_list') }}</div>
+        <div
+          v-for="item in failedItems"
+          :key="item.rss_id"
+          class="refresh-failed-item"
+        >
+          <span class="refresh-failed-name">{{ item.rss_name }}</span>
+          <span class="refresh-failed-msg">{{ item.message }}</span>
+        </div>
+      </div>
+
       <!-- Mobile: Card-based list -->
       <ab-data-list
         v-if="isMobile"
@@ -197,5 +236,41 @@ const rssRowKey = (row: RSS) => row.id;
   gap: 4px;
   flex-wrap: wrap;
   margin-top: 4px;
+}
+
+.refresh-summary {
+  background: var(--color-surface-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.refresh-summary-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-warn, #f0a020);
+  margin-bottom: 8px;
+}
+
+.refresh-failed-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.refresh-failed-name {
+  font-weight: 500;
+  color: var(--color-text);
+  flex-shrink: 0;
+}
+
+.refresh-failed-msg {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
