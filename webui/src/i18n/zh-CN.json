@@ -257,7 +257,13 @@
     "selectbox": "选择",
     "status": "状态",
     "title": "RSS 条目",
-    "url": "链接"
+    "url": "链接",
+    "refresh": "刷新",
+    "refresh_all": "刷新全部",
+    "refresh_all_success": "全部 {count} 个 RSS 源刷新成功。",
+    "refresh_all_failed": "全部 {count} 个 RSS 源刷新失败。",
+    "refresh_partial": "{success} 个成功，{failed} 个失败：{names}",
+    "refresh_empty": "没有需要刷新的 RSS 源。"
   },
   "calendar": {
     "title": "放送表",

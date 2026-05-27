@@ -9,12 +9,23 @@ definePage({
 const { t } = useMyI18n();
 const { isMobile } = useBreakpointQuery();
 const { rss, selectedRSS } = storeToRefs(useRSSStore());
-const { getAll, deleteSelected, disableSelected, enableSelected } =
+const { getAll, deleteSelected, disableSelected, enableSelected, refreshAllRSS } =
   useRSSStore();
 
 onActivated(() => {
   getAll();
 });
+
+const isLoading = ref(false);
+
+async function handleRefreshAll() {
+  isLoading.value = true;
+  try {
+    await refreshAllRSS();
+  } finally {
+    isLoading.value = false;
+  }
+}
 
 const rssColumns = computed<DataTableColumns<RSS>>(() => [
   {
@@ -77,6 +88,11 @@ const rssRowKey = (row: RSS) => row.id;
 <template>
   <div class="page-rss">
     <ab-container :title="$t('rss.title')">
+      <template #title-right>
+        <ab-button @click="handleRefreshAll" :loading="isLoading">
+          {{ $t('rss.refresh_all') }}
+        </ab-button>
+      </template>
       <!-- Mobile: Card-based list -->
       <ab-data-list
         v-if="isMobile"

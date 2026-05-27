@@ -3,7 +3,7 @@
  */
 
 import type { BangumiAPI, BangumiRule } from '#/bangumi';
-import type { RSS } from '#/rss';
+import type { RSS, BatchRefreshResult } from '#/rss';
 import type { ApiSuccess } from '#/api';
 import type { LoginSuccess } from '#/auth';
 
@@ -105,6 +105,48 @@ export const mockRSSList: RSS[] = [
     enabled: false,
   },
 ];
+
+// ============================================================================
+// Batch Refresh Result Mocks
+// ============================================================================
+
+export const mockBatchRefreshResult: BatchRefreshResult = {
+  total: 2,
+  success_count: 2,
+  failed_count: 0,
+  items: [
+    { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+    { rss_id: 2, rss_name: 'Feed 2', success: true, message: 'OK' },
+  ],
+};
+
+export const mockBatchRefreshPartial: BatchRefreshResult = {
+  total: 3,
+  success_count: 2,
+  failed_count: 1,
+  items: [
+    { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
+    { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Connection timeout' },
+    { rss_id: 3, rss_name: 'Feed 3', success: true, message: 'OK' },
+  ],
+};
+
+export const mockBatchRefreshAllFailed: BatchRefreshResult = {
+  total: 2,
+  success_count: 0,
+  failed_count: 2,
+  items: [
+    { rss_id: 1, rss_name: 'Feed 1', success: false, message: 'DNS error' },
+    { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'HTTP 500' },
+  ],
+};
+
+export const mockBatchRefreshEmpty: BatchRefreshResult = {
+  total: 0,
+  success_count: 0,
+  failed_count: 0,
+  items: [],
+};
 
 // ============================================================================
 // Config Mocks

@@ -1,0 +1,847 @@
+diff --git a/backend/src/module/api/rss.py b/backend/src/module/api/rss.py
+index f00411a..7f3480a 100644
+--- a/backend/src/module/api/rss.py
++++ b/backend/src/module/api/rss.py
+@@ -3,7 +3,14 @@ from fastapi.responses import JSONResponse
+ 
+ from module.downloader import DownloadClient
+ from module.manager import SeasonCollector
+-from module.models import APIResponse, Bangumi, RSSItem, RSSUpdate, Torrent
++from module.models import (
++    APIResponse,
++    Bangumi,
++    BatchRefreshResult,
++    RSSItem,
++    RSSUpdate,
++    Torrent,
++)
+ from module.rss import RSSAnalyser, RSSEngine
+ from module.security.api import UNAUTHORIZED, get_current_user
+ 
+@@ -129,17 +136,13 @@ async def update_rss(
+ 
+ @router.get(
+     path="/refresh/all",
+-    response_model=APIResponse,
++    response_model=BatchRefreshResult,
+     dependencies=[Depends(get_current_user)],
+ )
+ async def refresh_all():
+     async with DownloadClient() as client:
+         with RSSEngine() as engine:
+-            await engine.refresh_rss(client)
+-    return JSONResponse(
+-        status_code=200,
+-        content={"msg_en": "Refresh all RSS successfully.", "msg_zh": "刷新 RSS 成功。"},
+-    )
++            return await engine.refresh_rss_all(client)
+ 
+ 
+ @router.get(
+diff --git a/backend/src/module/models/__init__.py b/backend/src/module/models/__init__.py
+index d610684..28671b2 100644
+--- a/backend/src/module/models/__init__.py
++++ b/backend/src/module/models/__init__.py
+@@ -2,6 +2,6 @@ from .bangumi import Bangumi, BangumiUpdate, Episode, Notification
+ from .config import Config
+ from .passkey import Passkey, PasskeyCreate, PasskeyDelete, PasskeyList
+ from .response import APIResponse, ResponseModel
+-from .rss import RSSItem, RSSUpdate
++from .rss import RSSItem, RSSRefreshResult, BatchRefreshResult, RSSUpdate
+ from .torrent import EpisodeFile, SubtitleFile, Torrent, TorrentUpdate
+ from .user import User, UserLogin, UserUpdate
+diff --git a/backend/src/module/models/rss.py b/backend/src/module/models/rss.py
+index 8ea51ae..4e566c1 100644
+--- a/backend/src/module/models/rss.py
++++ b/backend/src/module/models/rss.py
+@@ -1,5 +1,6 @@
+ from typing import Optional
+ 
++from pydantic import BaseModel
+ from sqlmodel import Field, SQLModel
+ 
+ 
+@@ -21,3 +22,19 @@ class RSSUpdate(SQLModel):
+     aggregate: Optional[bool] = Field(True, alias="aggregate")
+     parser: Optional[str] = Field("mikan", alias="parser")
+     enabled: Optional[bool] = Field(True, alias="enabled")
++
++
++class RSSRefreshResult(BaseModel):
++    """Result of refreshing a single RSS feed."""
++    rss_id: int
++    rss_name: str
++    success: bool
++    message: str
++
++
++class BatchRefreshResult(BaseModel):
++    """Summary of batch RSS refresh operation."""
++    total: int
++    success_count: int
++    failed_count: int
++    items: list[RSSRefreshResult]
+diff --git a/backend/src/module/rss/engine.py b/backend/src/module/rss/engine.py
+index a9dc9da..d2021b9 100644
+--- a/backend/src/module/rss/engine.py
++++ b/backend/src/module/rss/engine.py
+@@ -6,7 +6,14 @@ from typing import Optional
+ 
+ from module.database import Database, engine
+ from module.downloader import DownloadClient
+-from module.models import Bangumi, ResponseModel, RSSItem, Torrent
++from module.models import (
++    Bangumi,
++    BatchRefreshResult,
++    ResponseModel,
++    RSSItem,
++    RSSRefreshResult,
++    Torrent,
++)
+ from module.network import RequestContent
+ 
+ logger = logging.getLogger(__name__)
+@@ -142,6 +149,23 @@ class RSSEngine(Database):
+                 return matched
+         return None
+ 
++    @staticmethod
++    def _sanitize_error(error: str) -> str:
++        """Remove potentially sensitive information from error messages.
++
++        Strips common patterns like passwords in URLs, tokens, cookies,
++        and downloader credentials from exception strings.
++        """
++        import re as _re
++
++        # Redact passwords in URLs (e.g. http://user:pass@host)
++        error = _re.sub(r"://[^:@]+:[^@]+@", "://***:***@", error)
++        # Redact common query parameters that may contain tokens
++        error = _re.sub(r"(token|key|pass|password|secret|auth)=[^&\s]+", r"\1=***", error, flags=_re.IGNORECASE)
++        # Redact cookie headers
++        error = _re.sub(r"(Cookie|Set-Cookie):\s*[^\n]+", r"\1: ***", error, flags=_re.IGNORECASE)
++        return error
++
+     async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
+         # Get All RSS Items
+         if not rss_id:
+@@ -172,6 +196,93 @@ class RSSEngine(Database):
+             self.torrent.add_all(new_torrents)
+         self.commit()
+ 
++    async def refresh_rss_all(
++        self, client: DownloadClient
++    ) -> BatchRefreshResult:
++        """Refresh all active RSS feeds and return per-item results.
++
++        Each RSS refresh is isolated; a failure in one feed does not
++        prevent subsequent feeds from being processed.
++        """
++        rss_items: list[RSSItem] = self.rss.search_active()
++        results: list[RSSRefreshResult] = []
++        success_count = 0
++        failed_count = 0
++        now = datetime.now(timezone.utc).isoformat()
++
++        # Fetch torrents concurrently
++        if rss_items:
++            gathered = await asyncio.gather(
++                *[self._pull_rss_with_status(rss_item) for rss_item in rss_items],
++                return_exceptions=True,
++            )
++
++            for rss_item, gathered_result in zip(rss_items, gathered):
++                if isinstance(gathered_result, Exception):
++                    error_str = self._sanitize_error(str(gathered_result))
++                    rss_item.connection_status = "error"
++                    rss_item.last_checked_at = now
++                    rss_item.last_error = error_str
++                    self.add(rss_item)
++                    results.append(
++                        RSSRefreshResult(
++                            rss_id=rss_item.id,
++                            rss_name=rss_item.name or "",
++                            success=False,
++                            message=error_str,
++                        )
++                    )
++                    failed_count += 1
++                else:
++                    new_torrents, error = gathered_result
++                    rss_item.connection_status = "error" if error else "healthy"
++                    rss_item.last_checked_at = now
++                    rss_item.last_error = error
++                    self.add(rss_item)
++                    try:
++                        for torrent in new_torrents:
++                            matched_data = self.match_torrent(torrent)
++                            if matched_data:
++                                if await client.add_torrent(torrent, matched_data):
++                                    logger.debug(
++                                        "[Engine] Add torrent %s to client",
++                                        torrent.name,
++                                    )
++                                torrent.downloaded = True
++                        self.torrent.add_all(new_torrents)
++                        results.append(
++                            RSSRefreshResult(
++                                rss_id=rss_item.id,
++                                rss_name=rss_item.name or "",
++                                success=True,
++                                message="OK",
++                            )
++                        )
++                        success_count += 1
++                    except Exception as e:
++                        error_str = self._sanitize_error(str(e))
++                        rss_item.connection_status = "error"
++                        rss_item.last_error = error_str
++                        self.add(rss_item)
++                        results.append(
++                            RSSRefreshResult(
++                                rss_id=rss_item.id,
++                                rss_name=rss_item.name or "",
++                                success=False,
++                                message=error_str,
++                            )
++                        )
++                        failed_count += 1
++
++        self.commit()
++
++        return BatchRefreshResult(
++            total=len(rss_items),
++            success_count=success_count,
++            failed_count=failed_count,
++            items=results,
++        )
++
+     async def download_bangumi(self, bangumi: Bangumi):
+         async with RequestContent() as req:
+             torrents = await req.get_torrents(
+diff --git a/backend/src/test/test_api_rss.py b/backend/src/test/test_api_rss.py
+index c5e1527..49325f0 100644
+--- a/backend/src/test/test_api_rss.py
++++ b/backend/src/test/test_api_rss.py
+@@ -7,7 +7,14 @@ from fastapi import FastAPI
+ from fastapi.testclient import TestClient
+ 
+ from module.api import v1
+-from module.models import RSSItem, RSSUpdate, ResponseModel, Torrent
++from module.models import (
++    RSSItem,
++    RSSRefreshResult,
++    BatchRefreshResult,
++    RSSUpdate,
++    ResponseModel,
++    Torrent,
++)
+ from module.security.api import get_current_user
+ 
+ from test.factories import make_rss_item, make_torrent
+@@ -259,21 +266,197 @@ class TestUpdateRss:
+ 
+ 
+ class TestRefreshRss:
+-    def test_refresh_all(self, authed_client):
+-        """GET /rss/refresh/all triggers engine.refresh_rss."""
++    def test_refresh_all_success(self, authed_client):
++        """GET /rss/refresh/all returns batch results when all succeed."""
++        batch_result = BatchRefreshResult(
++            total=2,
++            success_count=2,
++            failed_count=0,
++            items=[
++                RSSRefreshResult(
++                    rss_id=1, rss_name="Feed 1", success=True, message="OK"
++                ),
++                RSSRefreshResult(
++                    rss_id=2, rss_name="Feed 2", success=True, message="OK"
++                ),
++            ],
++        )
+         with patch("module.api.rss.DownloadClient") as MockClient:
+             mock_client = AsyncMock()
+             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+             with patch("module.api.rss.RSSEngine") as MockEngine:
+                 mock_eng = MagicMock()
+-                mock_eng.refresh_rss = AsyncMock()
++                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
++                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
++                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
++
++                response = authed_client.get("/api/v1/rss/refresh/all")
++
++        assert response.status_code == 200
++        data = response.json()
++        assert data["total"] == 2
++        assert data["success_count"] == 2
++        assert data["failed_count"] == 0
++        assert len(data["items"]) == 2
++        assert all(item["success"] for item in data["items"])
++
++    def test_refresh_all_partial_failure(self, authed_client):
++        """GET /rss/refresh/all returns batch results with partial failures."""
++        batch_result = BatchRefreshResult(
++            total=3,
++            success_count=2,
++            failed_count=1,
++            items=[
++                RSSRefreshResult(
++                    rss_id=1, rss_name="Feed 1", success=True, message="OK"
++                ),
++                RSSRefreshResult(
++                    rss_id=2,
++                    rss_name="Feed 2",
++                    success=False,
++                    message="Connection timeout",
++                ),
++                RSSRefreshResult(
++                    rss_id=3, rss_name="Feed 3", success=True, message="OK"
++                ),
++            ],
++        )
++        with patch("module.api.rss.DownloadClient") as MockClient:
++            mock_client = AsyncMock()
++            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
++            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
++            with patch("module.api.rss.RSSEngine") as MockEngine:
++                mock_eng = MagicMock()
++                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
++                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
++                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
++
++                response = authed_client.get("/api/v1/rss/refresh/all")
++
++        assert response.status_code == 200
++        data = response.json()
++        assert data["total"] == 3
++        assert data["success_count"] == 2
++        assert data["failed_count"] == 1
++        assert len(data["items"]) == 3
++        # Verify failed item
++        failed = [i for i in data["items"] if not i["success"]]
++        assert len(failed) == 1
++        assert failed[0]["rss_name"] == "Feed 2"
++        assert "timeout" in failed[0]["message"].lower()
++
++    def test_refresh_all_all_failed(self, authed_client):
++        """GET /rss/refresh/all returns batch results when all fail."""
++        batch_result = BatchRefreshResult(
++            total=2,
++            success_count=0,
++            failed_count=2,
++            items=[
++                RSSRefreshResult(
++                    rss_id=1,
++                    rss_name="Feed 1",
++                    success=False,
++                    message="DNS resolution failed",
++                ),
++                RSSRefreshResult(
++                    rss_id=2,
++                    rss_name="Feed 2",
++                    success=False,
++                    message="HTTP 500",
++                ),
++            ],
++        )
++        with patch("module.api.rss.DownloadClient") as MockClient:
++            mock_client = AsyncMock()
++            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
++            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
++            with patch("module.api.rss.RSSEngine") as MockEngine:
++                mock_eng = MagicMock()
++                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
+                 MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                 MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+ 
+                 response = authed_client.get("/api/v1/rss/refresh/all")
+ 
+         assert response.status_code == 200
++        data = response.json()
++        assert data["total"] == 2
++        assert data["success_count"] == 0
++        assert data["failed_count"] == 2
++        assert all(not item["success"] for item in data["items"])
++
++    def test_refresh_all_empty_list(self, authed_client):
++        """GET /rss/refresh/all with no active RSS feeds returns empty result."""
++        batch_result = BatchRefreshResult(
++            total=0,
++            success_count=0,
++            failed_count=0,
++            items=[],
++        )
++        with patch("module.api.rss.DownloadClient") as MockClient:
++            mock_client = AsyncMock()
++            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
++            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
++            with patch("module.api.rss.RSSEngine") as MockEngine:
++                mock_eng = MagicMock()
++                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
++                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
++                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
++
++                response = authed_client.get("/api/v1/rss/refresh/all")
++
++        assert response.status_code == 200
++        data = response.json()
++        assert data["total"] == 0
++        assert data["success_count"] == 0
++        assert data["failed_count"] == 0
++        assert data["items"] == []
++
++    def test_refresh_all_one_failure_does_not_block_others(self, authed_client):
++        """A single RSS failure does not prevent subsequent RSS from being refreshed."""
++        batch_result = BatchRefreshResult(
++            total=2,
++            success_count=1,
++            failed_count=1,
++            items=[
++                RSSRefreshResult(
++                    rss_id=1,
++                    rss_name="Bad Feed",
++                    success=False,
++                    message="Connection refused",
++                ),
++                RSSRefreshResult(
++                    rss_id=2,
++                    rss_name="Good Feed",
++                    success=True,
++                    message="OK",
++                ),
++            ],
++        )
++        with patch("module.api.rss.DownloadClient") as MockClient:
++            mock_client = AsyncMock()
++            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
++            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
++            with patch("module.api.rss.RSSEngine") as MockEngine:
++                mock_eng = MagicMock()
++                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
++                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
++                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
++
++                response = authed_client.get("/api/v1/rss/refresh/all")
++
++        assert response.status_code == 200
++        data = response.json()
++        # Bad Feed is item 0 and failed, Good Feed is item 1 and succeeded
++        assert data["total"] == 2
++        assert data["success_count"] == 1
++        assert data["failed_count"] == 1
++        items_sorted = sorted(data["items"], key=lambda i: i["rss_id"])
++        assert items_sorted[0]["rss_name"] == "Bad Feed"
++        assert not items_sorted[0]["success"]
++        assert items_sorted[1]["rss_name"] == "Good Feed"
++        assert items_sorted[1]["success"]
+ 
+     def test_refresh_single(self, authed_client):
+         """GET /rss/refresh/{id} refreshes specific feed."""
+diff --git a/webui/src/api/__tests__/rss.test.ts b/webui/src/api/__tests__/rss.test.ts
+index 9bbd412..4f9fa2f 100644
+--- a/webui/src/api/__tests__/rss.test.ts
++++ b/webui/src/api/__tests__/rss.test.ts
+@@ -7,6 +7,10 @@ import { describe, it, expect } from 'vitest';
+ import {
+   mockRSSItem,
+   mockRSSList,
++  mockBatchRefreshResult,
++  mockBatchRefreshPartial,
++  mockBatchRefreshAllFailed,
++  mockBatchRefreshEmpty,
+ } from '@/test/mocks/api';
+ 
+ describe('RSS API Logic', () => {
+@@ -128,4 +132,49 @@ describe('RSS API Logic', () => {
+       expect(updatedRSS.enabled).toBe(mockRSSItem.enabled);
+     });
+   });
++
++  describe('BatchRefreshResult structure', () => {
++    it('should have correct BatchRefreshResult fields for success', () => {
++      expect(mockBatchRefreshResult).toHaveProperty('total');
++      expect(mockBatchRefreshResult).toHaveProperty('success_count');
++      expect(mockBatchRefreshResult).toHaveProperty('failed_count');
++      expect(mockBatchRefreshResult).toHaveProperty('items');
++
++      expect(mockBatchRefreshResult.total).toBe(2);
++      expect(mockBatchRefreshResult.success_count).toBe(2);
++      expect(mockBatchRefreshResult.failed_count).toBe(0);
++      expect(mockBatchRefreshResult.items.length).toBe(2);
++      expect(mockBatchRefreshResult.items.every((i) => i.success)).toBe(true);
++    });
++
++    it('should have correct structure for partial failure', () => {
++      expect(mockBatchRefreshPartial.total).toBe(3);
++      expect(mockBatchRefreshPartial.success_count).toBe(2);
++      expect(mockBatchRefreshPartial.failed_count).toBe(1);
++
++      const failed = mockBatchRefreshPartial.items.filter((i) => !i.success);
++      expect(failed.length).toBe(1);
++      expect(failed[0].rss_name).toBe('Feed 2');
++      expect(failed[0].message).toBe('Connection timeout');
++    });
++
++    it('should have correct structure for all failure', () => {
++      expect(mockBatchRefreshAllFailed.total).toBe(2);
++      expect(mockBatchRefreshAllFailed.success_count).toBe(0);
++      expect(mockBatchRefreshAllFailed.failed_count).toBe(2);
++      expect(mockBatchRefreshAllFailed.items.every((i) => !i.success)).toBe(true);
++    });
++
++    it('should handle empty list correctly', () => {
++      expect(mockBatchRefreshEmpty.total).toBe(0);
++      expect(mockBatchRefreshEmpty.success_count).toBe(0);
++      expect(mockBatchRefreshEmpty.failed_count).toBe(0);
++      expect(mockBatchRefreshEmpty.items).toEqual([]);
++    });
++
++    it('should ensure failed count + success count = total', () => {
++      const result = mockBatchRefreshPartial;
++      expect(result.success_count + result.failed_count).toBe(result.total);
++    });
++  });
+ });
+diff --git a/webui/src/api/rss.ts b/webui/src/api/rss.ts
+index 9cd5d92..72fb8a2 100644
+--- a/webui/src/api/rss.ts
++++ b/webui/src/api/rss.ts
+@@ -1,4 +1,4 @@
+-import type { RSS } from '#/rss';
++import type { RSS, BatchRefreshResult } from '#/rss';
+ import type { Torrent } from '#/torrent';
+ import type { ApiSuccess } from '#/api';
+ 
+@@ -60,7 +60,9 @@ export const apiRSS = {
+   },
+ 
+   async refreshAll() {
+-    const { data } = await axios.get<ApiSuccess>('api/v1/rss/refresh/all');
++    const { data } = await axios.get<BatchRefreshResult>(
++      'api/v1/rss/refresh/all'
++    );
+     return data!;
+   },
+ 
+diff --git a/webui/src/i18n/en.json b/webui/src/i18n/en.json
+index dbaa4ef..29a4117 100644
+--- a/webui/src/i18n/en.json
++++ b/webui/src/i18n/en.json
+@@ -257,7 +257,13 @@
+     "selectbox": "Select",
+     "status": "Status",
+     "title": "RSS Item",
+-    "url": "Url"
++    "url": "Url",
++    "refresh": "Refresh",
++    "refresh_all": "Refresh All",
++    "refresh_all_success": "All {count} RSS feeds refreshed successfully.",
++    "refresh_all_failed": "All {count} RSS feeds failed to refresh.",
++    "refresh_partial": "{success} succeeded, {failed} failed: {names}",
++    "refresh_empty": "No RSS feeds to refresh."
+   },
+   "calendar": {
+     "title": "Schedule",
+diff --git a/webui/src/i18n/zh-CN.json b/webui/src/i18n/zh-CN.json
+index 5081dc1..7b789aa 100644
+--- a/webui/src/i18n/zh-CN.json
++++ b/webui/src/i18n/zh-CN.json
+@@ -257,7 +257,13 @@
+     "selectbox": "选择",
+     "status": "状态",
+     "title": "RSS 条目",
+-    "url": "链接"
++    "url": "链接",
++    "refresh": "刷新",
++    "refresh_all": "刷新全部",
++    "refresh_all_success": "全部 {count} 个 RSS 源刷新成功。",
++    "refresh_all_failed": "全部 {count} 个 RSS 源刷新失败。",
++    "refresh_partial": "{success} 个成功，{failed} 个失败：{names}",
++    "refresh_empty": "没有需要刷新的 RSS 源。"
+   },
+   "calendar": {
+     "title": "放送表",
+diff --git a/webui/src/pages/index/rss.vue b/webui/src/pages/index/rss.vue
+index 6355bab..511157c 100644
+--- a/webui/src/pages/index/rss.vue
++++ b/webui/src/pages/index/rss.vue
+@@ -9,13 +9,24 @@ definePage({
+ const { t } = useMyI18n();
+ const { isMobile } = useBreakpointQuery();
+ const { rss, selectedRSS } = storeToRefs(useRSSStore());
+-const { getAll, deleteSelected, disableSelected, enableSelected } =
++const { getAll, deleteSelected, disableSelected, enableSelected, refreshAllRSS } =
+   useRSSStore();
+ 
+ onActivated(() => {
+   getAll();
+ });
+ 
++const isLoading = ref(false);
++
++async function handleRefreshAll() {
++  isLoading.value = true;
++  try {
++    await refreshAllRSS();
++  } finally {
++    isLoading.value = false;
++  }
++}
++
+ const rssColumns = computed<DataTableColumns<RSS>>(() => [
+   {
+     type: 'selection',
+@@ -77,6 +88,11 @@ const rssRowKey = (row: RSS) => row.id;
+ <template>
+   <div class="page-rss">
+     <ab-container :title="$t('rss.title')">
++      <template #title-right>
++        <ab-button @click="handleRefreshAll" :loading="isLoading">
++          {{ $t('rss.refresh_all') }}
++        </ab-button>
++      </template>
+       <!-- Mobile: Card-based list -->
+       <ab-data-list
+         v-if="isMobile"
+diff --git a/webui/src/store/__tests__/rss.test.ts b/webui/src/store/__tests__/rss.test.ts
+index 12810b4..c428dc3 100644
+--- a/webui/src/store/__tests__/rss.test.ts
++++ b/webui/src/store/__tests__/rss.test.ts
+@@ -4,7 +4,13 @@
+  */
+ 
+ import { describe, it, expect } from 'vitest';
+-import { mockRSSList } from '@/test/mocks/api';
++import {
++  mockRSSList,
++  mockBatchRefreshResult,
++  mockBatchRefreshPartial,
++  mockBatchRefreshAllFailed,
++  mockBatchRefreshEmpty,
++} from '@/test/mocks/api';
+ 
+ describe('RSS Store Logic', () => {
+   describe('sort and filter functions', () => {
+@@ -95,4 +101,68 @@ describe('RSS Store Logic', () => {
+       expect(filtered).toEqual([1, 3]);
+     });
+   });
++
++  describe('refreshAllRSS result analysis logic', () => {
++    it('should detect all success', () => {
++      const result = mockBatchRefreshResult;
++      const allSuccess = result.failed_count === 0;
++      expect(allSuccess).toBe(true);
++      expect(result.success_count).toBe(result.total);
++    });
++
++    it('should detect partial failure', () => {
++      const result = mockBatchRefreshPartial;
++      const hasPartial = result.failed_count > 0 && result.success_count > 0;
++      expect(hasPartial).toBe(true);
++      expect(result.failed_count).toBe(1);
++      expect(result.success_count).toBe(2);
++    });
++
++    it('should detect all failure', () => {
++      const result = mockBatchRefreshAllFailed;
++      const allFailed = result.success_count === 0;
++      expect(allFailed).toBe(true);
++      expect(result.failed_count).toBe(result.total);
++    });
++
++    it('should detect empty list', () => {
++      const result = mockBatchRefreshEmpty;
++      expect(result.total).toBe(0);
++      expect(result.items).toHaveLength(0);
++    });
++
++    it('should extract failed item names and messages', () => {
++      const result = mockBatchRefreshPartial;
++      const failedItems = result.items.filter((i) => !i.success);
++      const failedNames = failedItems.map((i) => i.rss_name).join(', ');
++      const failedDetail = failedItems
++        .map((i) => `${i.rss_name}: ${i.message}`)
++        .join('\n');
++
++      expect(failedNames).toBe('Feed 2');
++      expect(failedDetail).toBe('Feed 2: Connection timeout');
++    });
++
++    it('should verify success + failure count = total', () => {
++      expect(
++        mockBatchRefreshResult.success_count +
++          mockBatchRefreshResult.failed_count
++      ).toBe(mockBatchRefreshResult.total);
++
++      expect(
++        mockBatchRefreshPartial.success_count +
++          mockBatchRefreshPartial.failed_count
++      ).toBe(mockBatchRefreshPartial.total);
++
++      expect(
++        mockBatchRefreshAllFailed.success_count +
++          mockBatchRefreshAllFailed.failed_count
++      ).toBe(mockBatchRefreshAllFailed.total);
++
++      expect(
++        mockBatchRefreshEmpty.success_count +
++          mockBatchRefreshEmpty.failed_count
++      ).toBe(mockBatchRefreshEmpty.total);
++    });
++  });
+ });
+diff --git a/webui/src/store/rss.ts b/webui/src/store/rss.ts
+index 8c645d3..146301f 100644
+--- a/webui/src/store/rss.ts
++++ b/webui/src/store/rss.ts
+@@ -1,4 +1,4 @@
+-import type { RSS } from '#/rss';
++import type { RSS, BatchRefreshResult, RSSRefreshResult } from '#/rss';
+ 
+ export const useRSSStore = defineStore('rss', () => {
+   const rss = ref<RSS[]>([]);
+@@ -34,6 +34,46 @@ export const useRSSStore = defineStore('rss', () => {
+   const deleteSelected = () => deleteRSS(selectedRSS.value);
+   const enableSelected = () => enableRSS(selectedRSS.value);
+ 
++  // Refresh all RSS with structured result display
++  const message = useMessage();
++  const { t } = useMyI18n();
++
++  async function refreshAllRSS(): Promise<BatchRefreshResult> {
++    const result = await apiRSS.refreshAll();
++    const { total, success_count, failed_count } = result;
++
++    if (total === 0) {
++      message.info(t('rss.refresh_empty'));
++    } else if (failed_count === 0) {
++      message.success(t('rss.refresh_all_success', { count: success_count }));
++    } else if (success_count === 0) {
++      message.error(t('rss.refresh_all_failed', { count: failed_count }));
++    } else {
++      // Partial failure: show warning with failed item names
++      const failedNames = result.items
++        .filter((item: RSSRefreshResult) => !item.success)
++        .map((item: RSSRefreshResult) => item.rss_name)
++        .join(', ');
++      const detail = result.items
++        .filter((item: RSSRefreshResult) => !item.success)
++        .map((item: RSSRefreshResult) => `${item.rss_name}: ${item.message}`)
++        .join('\n');
++      message.warning(
++        t('rss.refresh_partial', {
++          success: success_count,
++          failed: failed_count,
++          names: failedNames,
++        }),
++        { duration: 5000 }
++      );
++      // Log full details to console for debugging
++      console.warn('[RSS Refresh] Partial failure details:\n' + detail);
++    }
++
++    getAll();
++    return result;
++  }
++
+   return {
+     rss,
+     selectedRSS,
+@@ -46,5 +86,6 @@ export const useRSSStore = defineStore('rss', () => {
+     disableSelected,
+     deleteSelected,
+     enableSelected,
++    refreshAllRSS,
+   };
+ });
+diff --git a/webui/src/test/mocks/api.ts b/webui/src/test/mocks/api.ts
+index 9e3898a..e252666 100644
+--- a/webui/src/test/mocks/api.ts
++++ b/webui/src/test/mocks/api.ts
+@@ -3,7 +3,7 @@
+  */
+ 
+ import type { BangumiAPI, BangumiRule } from '#/bangumi';
+-import type { RSS } from '#/rss';
++import type { RSS, BatchRefreshResult } from '#/rss';
+ import type { ApiSuccess } from '#/api';
+ import type { LoginSuccess } from '#/auth';
+ 
+@@ -106,6 +106,48 @@ export const mockRSSList: RSS[] = [
+   },
+ ];
+ 
++// ============================================================================
++// Batch Refresh Result Mocks
++// ============================================================================
++
++export const mockBatchRefreshResult: BatchRefreshResult = {
++  total: 2,
++  success_count: 2,
++  failed_count: 0,
++  items: [
++    { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
++    { rss_id: 2, rss_name: 'Feed 2', success: true, message: 'OK' },
++  ],
++};
++
++export const mockBatchRefreshPartial: BatchRefreshResult = {
++  total: 3,
++  success_count: 2,
++  failed_count: 1,
++  items: [
++    { rss_id: 1, rss_name: 'Feed 1', success: true, message: 'OK' },
++    { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'Connection timeout' },
++    { rss_id: 3, rss_name: 'Feed 3', success: true, message: 'OK' },
++  ],
++};
++
++export const mockBatchRefreshAllFailed: BatchRefreshResult = {
++  total: 2,
++  success_count: 0,
++  failed_count: 2,
++  items: [
++    { rss_id: 1, rss_name: 'Feed 1', success: false, message: 'DNS error' },
++    { rss_id: 2, rss_name: 'Feed 2', success: false, message: 'HTTP 500' },
++  ],
++};
++
++export const mockBatchRefreshEmpty: BatchRefreshResult = {
++  total: 0,
++  success_count: 0,
++  failed_count: 0,
++  items: [],
++};
++
+ // ============================================================================
+ // Config Mocks
+ // ============================================================================
+diff --git a/webui/types/rss.ts b/webui/types/rss.ts
+index 41f104c..27f9f8a 100644
+--- a/webui/types/rss.ts
++++ b/webui/types/rss.ts
+@@ -10,6 +10,20 @@ export interface RSS {
+   last_error: string | null;
+ }
+ 
++export interface RSSRefreshResult {
++  rss_id: number;
++  rss_name: string;
++  success: boolean;
++  message: string;
++}
++
++export interface BatchRefreshResult {
++  total: number;
++  success_count: number;
++  failed_count: number;
++  items: RSSRefreshResult[];
++}
++
+ export const rssTemplate: RSS = {
+   id: 0,
+   name: '',

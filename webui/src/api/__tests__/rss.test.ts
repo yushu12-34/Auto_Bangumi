@@ -7,6 +7,10 @@ import { describe, it, expect } from 'vitest';
 import {
   mockRSSItem,
   mockRSSList,
+  mockBatchRefreshResult,
+  mockBatchRefreshPartial,
+  mockBatchRefreshAllFailed,
+  mockBatchRefreshEmpty,
 } from '@/test/mocks/api';
 
 describe('RSS API Logic', () => {
@@ -126,6 +130,51 @@ describe('RSS API Logic', () => {
       expect(updatedRSS.name).toBe('Updated Feed');
       expect(updatedRSS.url).toBe(mockRSSItem.url);
       expect(updatedRSS.enabled).toBe(mockRSSItem.enabled);
+    });
+  });
+
+  describe('BatchRefreshResult structure', () => {
+    it('should have correct BatchRefreshResult fields for success', () => {
+      expect(mockBatchRefreshResult).toHaveProperty('total');
+      expect(mockBatchRefreshResult).toHaveProperty('success_count');
+      expect(mockBatchRefreshResult).toHaveProperty('failed_count');
+      expect(mockBatchRefreshResult).toHaveProperty('items');
+
+      expect(mockBatchRefreshResult.total).toBe(2);
+      expect(mockBatchRefreshResult.success_count).toBe(2);
+      expect(mockBatchRefreshResult.failed_count).toBe(0);
+      expect(mockBatchRefreshResult.items.length).toBe(2);
+      expect(mockBatchRefreshResult.items.every((i) => i.success)).toBe(true);
+    });
+
+    it('should have correct structure for partial failure', () => {
+      expect(mockBatchRefreshPartial.total).toBe(3);
+      expect(mockBatchRefreshPartial.success_count).toBe(2);
+      expect(mockBatchRefreshPartial.failed_count).toBe(1);
+
+      const failed = mockBatchRefreshPartial.items.filter((i) => !i.success);
+      expect(failed.length).toBe(1);
+      expect(failed[0].rss_name).toBe('Feed 2');
+      expect(failed[0].message).toBe('Connection timeout');
+    });
+
+    it('should have correct structure for all failure', () => {
+      expect(mockBatchRefreshAllFailed.total).toBe(2);
+      expect(mockBatchRefreshAllFailed.success_count).toBe(0);
+      expect(mockBatchRefreshAllFailed.failed_count).toBe(2);
+      expect(mockBatchRefreshAllFailed.items.every((i) => !i.success)).toBe(true);
+    });
+
+    it('should handle empty list correctly', () => {
+      expect(mockBatchRefreshEmpty.total).toBe(0);
+      expect(mockBatchRefreshEmpty.success_count).toBe(0);
+      expect(mockBatchRefreshEmpty.failed_count).toBe(0);
+      expect(mockBatchRefreshEmpty.items).toEqual([]);
+    });
+
+    it('should ensure failed count + success count = total', () => {
+      const result = mockBatchRefreshPartial;
+      expect(result.success_count + result.failed_count).toBe(result.total);
     });
   });
 });

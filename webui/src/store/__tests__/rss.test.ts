@@ -4,7 +4,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mockRSSList } from '@/test/mocks/api';
+import {
+  mockRSSList,
+  mockBatchRefreshResult,
+  mockBatchRefreshPartial,
+  mockBatchRefreshAllFailed,
+  mockBatchRefreshEmpty,
+} from '@/test/mocks/api';
 
 describe('RSS Store Logic', () => {
   describe('sort and filter functions', () => {
@@ -93,6 +99,70 @@ describe('RSS Store Logic', () => {
       const filtered = selectedRSS.filter((id) => id !== 2);
 
       expect(filtered).toEqual([1, 3]);
+    });
+  });
+
+  describe('refreshAllRSS result analysis logic', () => {
+    it('should detect all success', () => {
+      const result = mockBatchRefreshResult;
+      const allSuccess = result.failed_count === 0;
+      expect(allSuccess).toBe(true);
+      expect(result.success_count).toBe(result.total);
+    });
+
+    it('should detect partial failure', () => {
+      const result = mockBatchRefreshPartial;
+      const hasPartial = result.failed_count > 0 && result.success_count > 0;
+      expect(hasPartial).toBe(true);
+      expect(result.failed_count).toBe(1);
+      expect(result.success_count).toBe(2);
+    });
+
+    it('should detect all failure', () => {
+      const result = mockBatchRefreshAllFailed;
+      const allFailed = result.success_count === 0;
+      expect(allFailed).toBe(true);
+      expect(result.failed_count).toBe(result.total);
+    });
+
+    it('should detect empty list', () => {
+      const result = mockBatchRefreshEmpty;
+      expect(result.total).toBe(0);
+      expect(result.items).toHaveLength(0);
+    });
+
+    it('should extract failed item names and messages', () => {
+      const result = mockBatchRefreshPartial;
+      const failedItems = result.items.filter((i) => !i.success);
+      const failedNames = failedItems.map((i) => i.rss_name).join(', ');
+      const failedDetail = failedItems
+        .map((i) => `${i.rss_name}: ${i.message}`)
+        .join('\n');
+
+      expect(failedNames).toBe('Feed 2');
+      expect(failedDetail).toBe('Feed 2: Connection timeout');
+    });
+
+    it('should verify success + failure count = total', () => {
+      expect(
+        mockBatchRefreshResult.success_count +
+          mockBatchRefreshResult.failed_count
+      ).toBe(mockBatchRefreshResult.total);
+
+      expect(
+        mockBatchRefreshPartial.success_count +
+          mockBatchRefreshPartial.failed_count
+      ).toBe(mockBatchRefreshPartial.total);
+
+      expect(
+        mockBatchRefreshAllFailed.success_count +
+          mockBatchRefreshAllFailed.failed_count
+      ).toBe(mockBatchRefreshAllFailed.total);
+
+      expect(
+        mockBatchRefreshEmpty.success_count +
+          mockBatchRefreshEmpty.failed_count
+      ).toBe(mockBatchRefreshEmpty.total);
     });
   });
 });

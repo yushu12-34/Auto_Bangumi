@@ -1,5 +1,6 @@
 from typing import Optional
 
+from pydantic import BaseModel
 from sqlmodel import Field, SQLModel
 
 
@@ -21,3 +22,19 @@ class RSSUpdate(SQLModel):
     aggregate: Optional[bool] = Field(True, alias="aggregate")
     parser: Optional[str] = Field("mikan", alias="parser")
     enabled: Optional[bool] = Field(True, alias="enabled")
+
+
+class RSSRefreshResult(BaseModel):
+    """Result of refreshing a single RSS feed."""
+    rss_id: int
+    rss_name: str
+    success: bool
+    message: str
+
+
+class BatchRefreshResult(BaseModel):
+    """Summary of batch RSS refresh operation."""
+    total: int
+    success_count: int
+    failed_count: int
+    items: list[RSSRefreshResult]

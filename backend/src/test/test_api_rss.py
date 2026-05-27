@@ -7,7 +7,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from module.api import v1
-from module.models import RSSItem, RSSUpdate, ResponseModel, Torrent
+from module.models import (
+    RSSItem,
+    RSSRefreshResult,
+    BatchRefreshResult,
+    RSSUpdate,
+    ResponseModel,
+    Torrent,
+)
 from module.security.api import get_current_user
 
 from test.factories import make_rss_item, make_torrent
@@ -259,21 +266,197 @@ class TestUpdateRss:
 
 
 class TestRefreshRss:
-    def test_refresh_all(self, authed_client):
-        """GET /rss/refresh/all triggers engine.refresh_rss."""
+    def test_refresh_all_success(self, authed_client):
+        """GET /rss/refresh/all returns batch results when all succeed."""
+        batch_result = BatchRefreshResult(
+            total=2,
+            success_count=2,
+            failed_count=0,
+            items=[
+                RSSRefreshResult(
+                    rss_id=1, rss_name="Feed 1", success=True, message="OK"
+                ),
+                RSSRefreshResult(
+                    rss_id=2, rss_name="Feed 2", success=True, message="OK"
+                ),
+            ],
+        )
         with patch("module.api.rss.DownloadClient") as MockClient:
             mock_client = AsyncMock()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("module.api.rss.RSSEngine") as MockEngine:
                 mock_eng = MagicMock()
-                mock_eng.refresh_rss = AsyncMock()
+                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
                 MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
                 MockEngine.return_value.__exit__ = MagicMock(return_value=False)
 
                 response = authed_client.get("/api/v1/rss/refresh/all")
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["success_count"] == 2
+        assert data["failed_count"] == 0
+        assert len(data["items"]) == 2
+        assert all(item["success"] for item in data["items"])
+
+    def test_refresh_all_partial_failure(self, authed_client):
+        """GET /rss/refresh/all returns batch results with partial failures."""
+        batch_result = BatchRefreshResult(
+            total=3,
+            success_count=2,
+            failed_count=1,
+            items=[
+                RSSRefreshResult(
+                    rss_id=1, rss_name="Feed 1", success=True, message="OK"
+                ),
+                RSSRefreshResult(
+                    rss_id=2,
+                    rss_name="Feed 2",
+                    success=False,
+                    message="Connection timeout",
+                ),
+                RSSRefreshResult(
+                    rss_id=3, rss_name="Feed 3", success=True, message="OK"
+                ),
+            ],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["success_count"] == 2
+        assert data["failed_count"] == 1
+        assert len(data["items"]) == 3
+        # Verify failed item
+        failed = [i for i in data["items"] if not i["success"]]
+        assert len(failed) == 1
+        assert failed[0]["rss_name"] == "Feed 2"
+        assert "timeout" in failed[0]["message"].lower()
+
+    def test_refresh_all_all_failed(self, authed_client):
+        """GET /rss/refresh/all returns batch results when all fail."""
+        batch_result = BatchRefreshResult(
+            total=2,
+            success_count=0,
+            failed_count=2,
+            items=[
+                RSSRefreshResult(
+                    rss_id=1,
+                    rss_name="Feed 1",
+                    success=False,
+                    message="DNS resolution failed",
+                ),
+                RSSRefreshResult(
+                    rss_id=2,
+                    rss_name="Feed 2",
+                    success=False,
+                    message="HTTP 500",
+                ),
+            ],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert data["success_count"] == 0
+        assert data["failed_count"] == 2
+        assert all(not item["success"] for item in data["items"])
+
+    def test_refresh_all_empty_list(self, authed_client):
+        """GET /rss/refresh/all with no active RSS feeds returns empty result."""
+        batch_result = BatchRefreshResult(
+            total=0,
+            success_count=0,
+            failed_count=0,
+            items=[],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 0
+        assert data["success_count"] == 0
+        assert data["failed_count"] == 0
+        assert data["items"] == []
+
+    def test_refresh_all_one_failure_does_not_block_others(self, authed_client):
+        """A single RSS failure does not prevent subsequent RSS from being refreshed."""
+        batch_result = BatchRefreshResult(
+            total=2,
+            success_count=1,
+            failed_count=1,
+            items=[
+                RSSRefreshResult(
+                    rss_id=1,
+                    rss_name="Bad Feed",
+                    success=False,
+                    message="Connection refused",
+                ),
+                RSSRefreshResult(
+                    rss_id=2,
+                    rss_name="Good Feed",
+                    success=True,
+                    message="OK",
+                ),
+            ],
+        )
+        with patch("module.api.rss.DownloadClient") as MockClient:
+            mock_client = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("module.api.rss.RSSEngine") as MockEngine:
+                mock_eng = MagicMock()
+                mock_eng.refresh_rss_all = AsyncMock(return_value=batch_result)
+                MockEngine.return_value.__enter__ = MagicMock(return_value=mock_eng)
+                MockEngine.return_value.__exit__ = MagicMock(return_value=False)
+
+                response = authed_client.get("/api/v1/rss/refresh/all")
+
+        assert response.status_code == 200
+        data = response.json()
+        # Bad Feed is item 0 and failed, Good Feed is item 1 and succeeded
+        assert data["total"] == 2
+        assert data["success_count"] == 1
+        assert data["failed_count"] == 1
+        items_sorted = sorted(data["items"], key=lambda i: i["rss_id"])
+        assert items_sorted[0]["rss_name"] == "Bad Feed"
+        assert not items_sorted[0]["success"]
+        assert items_sorted[1]["rss_name"] == "Good Feed"
+        assert items_sorted[1]["success"]
 
     def test_refresh_single(self, authed_client):
         """GET /rss/refresh/{id} refreshes specific feed."""

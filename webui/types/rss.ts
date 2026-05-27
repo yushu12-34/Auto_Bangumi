@@ -10,6 +10,20 @@ export interface RSS {
   last_error: string | null;
 }
 
+export interface RSSRefreshResult {
+  rss_id: number;
+  rss_name: string;
+  success: boolean;
+  message: string;
+}
+
+export interface BatchRefreshResult {
+  total: number;
+  success_count: number;
+  failed_count: number;
+  items: RSSRefreshResult[];
+}
+
 export const rssTemplate: RSS = {
   id: 0,
   name: '',

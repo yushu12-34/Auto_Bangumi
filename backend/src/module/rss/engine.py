@@ -6,7 +6,14 @@ from typing import Optional
 
 from module.database import Database, engine
 from module.downloader import DownloadClient
-from module.models import Bangumi, ResponseModel, RSSItem, Torrent
+from module.models import (
+    Bangumi,
+    BatchRefreshResult,
+    ResponseModel,
+    RSSItem,
+    RSSRefreshResult,
+    Torrent,
+)
 from module.network import RequestContent
 
 logger = logging.getLogger(__name__)
@@ -142,6 +149,23 @@ class RSSEngine(Database):
                 return matched
         return None
 
+    @staticmethod
+    def _sanitize_error(error: str) -> str:
+        """Remove potentially sensitive information from error messages.
+
+        Strips common patterns like passwords in URLs, tokens, cookies,
+        and downloader credentials from exception strings.
+        """
+        import re as _re
+
+        # Redact passwords in URLs (e.g. http://user:pass@host)
+        error = _re.sub(r"://[^:@]+:[^@]+@", "://***:***@", error)
+        # Redact common query parameters that may contain tokens
+        error = _re.sub(r"(token|key|pass|password|secret|auth)=[^&\s]+", r"\1=***", error, flags=_re.IGNORECASE)
+        # Redact cookie headers
+        error = _re.sub(r"(Cookie|Set-Cookie):\s*[^\n]+", r"\1: ***", error, flags=_re.IGNORECASE)
+        return error
+
     async def refresh_rss(self, client: DownloadClient, rss_id: Optional[int] = None):
         # Get All RSS Items
         if not rss_id:
@@ -171,6 +195,93 @@ class RSSEngine(Database):
             # Add all torrents to database
             self.torrent.add_all(new_torrents)
         self.commit()
+
+    async def refresh_rss_all(
+        self, client: DownloadClient
+    ) -> BatchRefreshResult:
+        """Refresh all active RSS feeds and return per-item results.
+
+        Each RSS refresh is isolated; a failure in one feed does not
+        prevent subsequent feeds from being processed.
+        """
+        rss_items: list[RSSItem] = self.rss.search_active()
+        results: list[RSSRefreshResult] = []
+        success_count = 0
+        failed_count = 0
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Fetch torrents concurrently
+        if rss_items:
+            gathered = await asyncio.gather(
+                *[self._pull_rss_with_status(rss_item) for rss_item in rss_items],
+                return_exceptions=True,
+            )
+
+            for rss_item, gathered_result in zip(rss_items, gathered):
+                if isinstance(gathered_result, Exception):
+                    error_str = self._sanitize_error(str(gathered_result))
+                    rss_item.connection_status = "error"
+                    rss_item.last_checked_at = now
+                    rss_item.last_error = error_str
+                    self.add(rss_item)
+                    results.append(
+                        RSSRefreshResult(
+                            rss_id=rss_item.id,
+                            rss_name=rss_item.name or "",
+                            success=False,
+                            message=error_str,
+                        )
+                    )
+                    failed_count += 1
+                else:
+                    new_torrents, error = gathered_result
+                    rss_item.connection_status = "error" if error else "healthy"
+                    rss_item.last_checked_at = now
+                    rss_item.last_error = error
+                    self.add(rss_item)
+                    try:
+                        for torrent in new_torrents:
+                            matched_data = self.match_torrent(torrent)
+                            if matched_data:
+                                if await client.add_torrent(torrent, matched_data):
+                                    logger.debug(
+                                        "[Engine] Add torrent %s to client",
+                                        torrent.name,
+                                    )
+                                torrent.downloaded = True
+                        self.torrent.add_all(new_torrents)
+                        results.append(
+                            RSSRefreshResult(
+                                rss_id=rss_item.id,
+                                rss_name=rss_item.name or "",
+                                success=True,
+                                message="OK",
+                            )
+                        )
+                        success_count += 1
+                    except Exception as e:
+                        error_str = self._sanitize_error(str(e))
+                        rss_item.connection_status = "error"
+                        rss_item.last_error = error_str
+                        self.add(rss_item)
+                        results.append(
+                            RSSRefreshResult(
+                                rss_id=rss_item.id,
+                                rss_name=rss_item.name or "",
+                                success=False,
+                                message=error_str,
+                            )
+                        )
+                        failed_count += 1
+
+        self.commit()
+
+        return BatchRefreshResult(
+            total=len(rss_items),
+            success_count=success_count,
+            failed_count=failed_count,
+            items=results,
+        )
 
     async def download_bangumi(self, bangumi: Bangumi):
         async with RequestContent() as req:
